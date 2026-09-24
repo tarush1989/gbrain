@@ -42,8 +42,8 @@ and upgrading does not authorize paid enrichment.
 ### Itemized changes
 
 - Scope withdrawal candidates and chunk deletion to exact source-local fact
-  evidence through indexed shortlists, including provenance-only, timeline and
-  legacy-fence cases.
+  evidence through source-filtered indexed shortlists, with exact fallbacks for
+  empty or missing search vectors and legacy body-fence cases.
 - Preserve unrelated canonical pages for subjectless, database-only facts and
   make repeat withdrawal a no-op, while always queuing the source-wide mirror
   for a newly committed ledger row so canonical drift can heal.
