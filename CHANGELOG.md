@@ -2,6 +2,54 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.56.1.0] - 2026-09-24
+
+**Forgetting a database-only memory no longer knocks unrelated pages out of search.**
+
+Fact withdrawal now invalidates only pages and chunks that carry evidence for
+the withdrawn fact: its exact fact fence, recorded provenance, or a stale exact
+chunk. A subjectless fact with no matching page leaves every unrelated page,
+chunk, tag and history row intact.
+
+Publication also rechecks fact withdrawals after preparation. If a matching
+fact is withdrawn before a page commits, the write is rejected and can be
+prepared again from current state. A malformed fact fence is rejected with an
+explicit repair instruction instead of claiming that an unchanged retry will
+help.
+
+### How to use it
+
+Use the existing remember and forget surfaces. There is no new flag, schema
+migration, or provider authorization:
+
+```bash
+gbrain forget <fact-id> --source <source-id>
+```
+
+### Things to watch
+
+This release prevents new over-broad invalidation; it does not reconstruct
+search rows removed by an older release. Inspect an affected source with
+`gbrain doctor` and use its source-scoped repair guidance. Full-source
+withdrawal-mirror recovery remains separate from this fix.
+
+## To take advantage of v0.56.1.0
+
+Run `gbrain upgrade` on the brain host and restart its existing owner and
+workers normally. No database migration or enrichment backfill is required,
+and upgrading does not authorize paid enrichment.
+
+### Itemized changes
+
+- Scope withdrawal candidates and chunk deletion to exact source-local fact
+  evidence, including provenance-only, timeline and legacy-fence cases.
+- Preserve unrelated canonical pages for subjectless, database-only facts and
+  make repeat withdrawal a no-op.
+- Validate prepared file, page, code and managed-memory publication against the
+  current withdrawal ledger before commit.
+- Cover PGLite and Postgres publication races, malformed fences, deleted-page
+  restoration, stale chunks and whitespace/escaping fingerprints.
+
 ## [0.54.1.1] - 2026-09-24
 
 **Your agent can now open administration and guide another agent through a working connection.**
