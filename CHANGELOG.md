@@ -14,8 +14,8 @@ chunk, tag and history row intact.
 Publication also rechecks fact withdrawals after preparation. If a matching
 fact is withdrawn before a page commits, the write is rejected and can be
 prepared again from current state. A malformed fact fence is rejected with an
-explicit repair instruction instead of claiming that an unchanged retry will
-help.
+explicit repair instruction only when it contains the withdrawn claim; inline
+marker documentation and unrelated malformed rows remain importable.
 
 ### How to use it
 
@@ -42,9 +42,11 @@ and upgrading does not authorize paid enrichment.
 ### Itemized changes
 
 - Scope withdrawal candidates and chunk deletion to exact source-local fact
-  evidence, including provenance-only, timeline and legacy-fence cases.
+  evidence through indexed shortlists, including provenance-only, timeline and
+  legacy-fence cases.
 - Preserve unrelated canonical pages for subjectless, database-only facts and
-  make repeat withdrawal a no-op.
+  make repeat withdrawal a no-op, while always queuing the source-wide mirror
+  for a newly committed ledger row so canonical drift can heal.
 - Validate prepared file, page, code and managed-memory publication against the
   current withdrawal ledger before commit.
 - Cover PGLite and Postgres publication races, malformed fences, deleted-page
