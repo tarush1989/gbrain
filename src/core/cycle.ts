@@ -1423,6 +1423,15 @@ async function runPhaseExtract(
     } catch (e) {
       staleDetails = { stale_drain_error: e instanceof Error ? e.message : String(e) };
     }
+    // A lost timeline batch (e.g. a managed-writer refusal) fails the phase: its
+    // pages were left unstamped so the stale sweep can retry the rows.
+    const lost = result?.timeline_rows_lost ?? 0;
+    if (lost > 0) return {
+      phase: 'extract', status: 'fail', duration_ms: 0, summary: `${lost} timeline row(s) failed to write`,
+      details: { linksCreated, timelineCreated, timeline_rows_lost: lost, pages_processed: result?.pages_processed ?? 0, incremental, ...staleDetails },
+      error: { class: 'InternalError', code: 'TIMELINE_ROWS_LOST', message: `${lost} timeline row(s) failed to write; see stderr batch_error lines`,
+        hint: 'Pages with lost rows stay stale; re-run `gbrain extract --stale` after fixing the cause.' },
+    };
     return {
       phase: 'extract',
       status: 'ok',

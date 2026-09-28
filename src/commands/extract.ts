@@ -43,6 +43,7 @@ import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { ATTENDANCE_REPAIR_HELP, isAttendanceRepairRequest } from './extract-attendance-repair.ts';
 import { join, relative, dirname } from 'path';
 import type { BrainEngine, LinkBatchInput, TimelineBatchInput } from '../core/engine.ts';
+import type { BatchAuditSite } from '../core/retry.ts';
 import type { PageType } from '../core/types.ts';
 import { parseMarkdown } from '../core/markdown.ts';
 import { resolveCandidateSources, resolveLinkFallbackDefault, loadLinkPageMetadata, capturedLinkEndpoints, fileLinkOwnership, replaceFileLinks, type LinkPageMetadata } from '../core/link-reconciliation.ts';
@@ -88,6 +89,8 @@ import { runSlidingPool } from '../core/worker-pool.ts';
 import { isAborted } from '../core/abort-check.ts';
 import { parseWorkers, resolveWorkersWithClamp } from '../core/sync-concurrency.ts';
 import { loadAllSources } from '../core/sources-load.ts';
+import { withCoordinatedWrite } from '../core/persistence/context.ts';
+import { managedPersistenceEnabled } from '../core/persistence/ownership.ts';
 
 // Batch size for addLinksBatch / addTimelineEntriesBatch.
 // Postgres bind-parameter limit is 65535. Links use 4 cols/row → 16K hard ceiling;
@@ -245,6 +248,25 @@ interface ExtractResult {
   skipped_missing_target?: number;
   skipped_attendance_incomplete?: number;
   skipped_cross_source?: number;
+  /** Timeline rows whose batch write failed. Non-zero means the run is incomplete. */
+  timeline_rows_lost?: number;
+}
+
+/**
+ * Timeline rows are a derived projection of canonical markdown, but on a
+ * managed brain the `timeline_entries` writer guard still refuses any insert
+ * made without the persistence coordinator's source capability
+ * (`writer_coordinator_required`). Every batch writer in this file goes
+ * through here so the fs walk, the incremental cycle path, the DB walk and
+ * the stale sweep hold the capability for exactly the sources they write,
+ * one bounded transaction per batch. Unmanaged brains keep the direct write.
+ */
+async function addTimelineRowsCoordinated(
+  engine: BrainEngine, rows: TimelineBatchInput[], auditSite: BatchAuditSite,
+): Promise<number> {
+  if (!(await managedPersistenceEnabled(engine))) return engine.addTimelineEntriesBatch(rows, { auditSite });
+  const sourceIds = [...new Set(rows.map(row => row.source_id ?? 'default'))];
+  return engine.transaction(tx => withCoordinatedWrite(tx, sourceIds, () => tx.addTimelineEntriesBatch(rows, { auditSite })));
 }
 
 // --- Shared walker ---
@@ -720,6 +742,7 @@ export async function runExtractCore(engine: BrainEngine, opts: ExtractOpts): Pr
     result.links_created = r.links_created;
     result.timeline_entries_created = r.timeline_created;
     result.pages_processed = r.pages;
+    if (r.timeline_lost > 0) result.timeline_rows_lost = r.timeline_lost;
     return result;
   }
 
@@ -746,6 +769,7 @@ export async function runExtractCore(engine: BrainEngine, opts: ExtractOpts): Pr
     const r = await extractTimelineFromDir(engine, opts.dir, dryRun, jsonMode, workers, opts.signal, opts.sourceId, quiet);
     result.timeline_entries_created = r.created;
     result.pages_processed = Math.max(result.pages_processed, r.pages);
+    if (r.lost > 0) result.timeline_rows_lost = r.lost;
   }
 
   // #3957: stamp the links_extracted_at watermark for the walked pages —
@@ -757,7 +781,9 @@ export async function runExtractCore(engine: BrainEngine, opts: ExtractOpts): Pr
   // source id + the row's pre-read updated_at (D4); files with no pages row
   // at snapshot time are skipped (nothing to stamp — they stay visible to
   // `extract --stale` once synced).
-  if (!dryRun && opts.mode === 'all' && !isAborted(opts.signal)) {
+  // A lost timeline batch withholds the watermark: it would otherwise hide
+  // the dropped rows from `extract --stale` forever.
+  if (!dryRun && opts.mode === 'all' && !isAborted(opts.signal) && !result.timeline_rows_lost) {
     for (let i = 0; i < stampRefs.length; i += BATCH_SIZE) {
       await stampExtracted(engine, stampRefs.slice(i, i + BATCH_SIZE));
     }
@@ -1218,7 +1244,7 @@ async function extractForSlugs(
   includeFrontmatter: boolean = false,
   // Embedded callers own the report: nothing on stdout (see ExtractOpts.quiet).
   quiet: boolean = false,
-): Promise<{ links_created: number; timeline_created: number; pages: number }> {
+): Promise<{ links_created: number; timeline_created: number; pages: number; timeline_lost: number }> {
   const stdoutQuiet = jsonMode || quiet;
   // Build the full slug set for link resolution (fast: just readdir, no file reads)
   const allFiles = walkMarkdownFiles(brainDir);
@@ -1288,13 +1314,15 @@ async function extractForSlugs(
     }
   }
 
+  let timelineLost = 0;
   async function flushTimeline() {
     if (timelineBatch.length === 0) return;
     const snapshot = timelineBatch.slice();
     timelineBatch.length = 0;
     try {
-      timelineCreated += await engine.addTimelineEntriesBatch(snapshot, { auditSite: 'extract.timeline_inc' });
+      timelineCreated += await addTimelineRowsCoordinated(engine, snapshot, 'extract.timeline_inc');
     } catch (e) {
+      timelineLost += snapshot.length;
       const msg = e instanceof Error ? e.message : String(e);
       if (jsonMode) {
         process.stderr.write(JSON.stringify({ event: 'batch_error', size: snapshot.length, error: msg }) + '\n');
@@ -1378,8 +1406,10 @@ async function extractForSlugs(
   // those pages never get links_extracted_at and stay permanently visible
   // to `extract --stale` / doctor. Stamp only after BOTH batches flushed,
   // with the pre-read updated_at snapshot (D4) — refs the snapshot never
-  // saw (row created mid-run) are skipped and stay stale.
-  if (!dryRun && mode === 'all') {
+  // saw (row created mid-run) are skipped and stay stale. A lost timeline
+  // batch withholds the stamp too: the watermark asserts full extraction,
+  // and an unstamped page is what lets `extract --stale` retry the rows.
+  if (!dryRun && mode === 'all' && timelineLost === 0) {
     await stampExtracted(engine, refsWithSnapshotStamps(processedRefs, stampSnapshot));
   }
   progress.finish();
@@ -1389,7 +1419,7 @@ async function extractForSlugs(
     console.log(`Incremental extract: ${label} ${linksCreated} link(s), ${timelineCreated} timeline entries from ${pagesProcessed}/${slugs.length} page(s)`);
   }
 
-  return { links_created: linksCreated, timeline_created: timelineCreated, pages: pagesProcessed };
+  return { links_created: linksCreated, timeline_created: timelineCreated, pages: pagesProcessed, timeline_lost: timelineLost };
 }
 
 async function extractLinksFromDir(
@@ -1507,12 +1537,13 @@ async function extractTimelineFromDir(
   sourceId?: string,
   // Embedded callers own the report: nothing on stdout (see ExtractOpts.quiet).
   quiet: boolean = false,
-): Promise<{ created: number; pages: number }> {
+): Promise<{ created: number; pages: number; lost: number }> {
   const stdoutQuiet = jsonMode || quiet;
   const files = walkMarkdownFiles(brainDir);
 
   const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
   progress.start('extract.timeline_fs', files.length);
+  let lost = 0;
 
   // Dedup in dry-run only — DB enforces uniqueness via ON CONFLICT in batch writes.
   const dryRunSeen = dryRun ? new Set<string>() : null;
@@ -1524,8 +1555,9 @@ async function extractTimelineFromDir(
     const snapshot = batch.slice();
     batch.length = 0;
     try {
-      created += await engine.addTimelineEntriesBatch(snapshot, { auditSite: 'extract.timeline_fs' });
+      created += await addTimelineRowsCoordinated(engine, snapshot, 'extract.timeline_fs');
     } catch (e) {
+      lost += snapshot.length;
       const msg = e instanceof Error ? e.message : String(e);
       if (jsonMode) {
         process.stderr.write(JSON.stringify({ event: 'batch_error', size: snapshot.length, error: msg }) + '\n');
@@ -1569,7 +1601,7 @@ async function extractTimelineFromDir(
     const label = dryRun ? '(dry run) would create' : 'created';
     console.log(`Timeline: ${label} ${created} entries from ${files.length} pages`);
   }
-  return { created, pages: files.length };
+  return { created, pages: files.length, lost };
 }
 
 // --- Sync integration hooks ---
@@ -1979,7 +2011,7 @@ async function extractTimelineFromDB(
     const snapshot = batch.slice();
     batch.length = 0;
     try {
-      created += await engine.addTimelineEntriesBatch(snapshot, { auditSite: 'extract.timeline_db' });
+      created += await addTimelineRowsCoordinated(engine, snapshot, 'extract.timeline_db');
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (jsonMode) {
@@ -2239,7 +2271,7 @@ export async function extractStaleFromDB(
     }
 
     for (let i = 0; i < timelineRows.length; i += BATCH_SIZE) {
-      timelineCreated += await engine.addTimelineEntriesBatch(timelineRows.slice(i, i + BATCH_SIZE), { auditSite: 'extract.stale' });
+      timelineCreated += await addTimelineRowsCoordinated(engine, timelineRows.slice(i, i + BATCH_SIZE), 'extract.stale');
     }
     // Stamp LAST, directly (not the swallowing stampExtracted) so a stamp
     // failure surfaces instead of looping forever.
