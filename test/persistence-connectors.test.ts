@@ -46,6 +46,35 @@ test('public Google sync journals DB-only imports and repeat/restart checkpoints
   }
 }), 120_000);
 
+test('managed Google cursor survives scheduling and routing config updates', async () => withEnv(env, async () => {
+  for (const engine of engines) {
+    const config = { kind: 'google', g_account: 'owner@example.invalid', g_services: 'contacts', g_access: 'env', g_token_env: 'CONNECTOR_TEST_TOKEN' };
+    const f = await source(engine, config);
+    const calls: string[] = [];
+    const fetcher = async (url: string) => {
+      calls.push(url);
+      if (url.includes('/settings/sendAs')) return json({ sendAs: [] });
+      if (url.includes('/people/me/connections')) return json({
+        connections: [{ resourceName: 'people/fixture-1', names: [{ displayName: 'Example Contact' }], emailAddresses: [{ value: 'contact@example.invalid' }] }],
+        nextSyncToken: 'contacts-1',
+      });
+      throw new Error('Unexpected external fixture route');
+    };
+    const cfg = parseGoogleSourceConfig(config, f.dir);
+    await runGoogleSync(engine, f.id, cfg, options, fetcher);
+    const checkpoints = await engine.executeRaw<{ fingerprint: string }>("SELECT DISTINCT intent->>'checkpointKey' AS fingerprint FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_connector_checkpoint'", [f.id]);
+    expect(checkpoints).toHaveLength(1);
+
+    await engine.executeRaw('UPDATE sources SET config=config || $2::text::jsonb WHERE id=$1', [f.id, JSON.stringify({
+      syncEnabled: false, federated: false, last_source_cycle_at: '2026-09-28T00:00:00Z', last_full_cycle_at: '2026-09-28T00:00:00Z',
+    })]);
+    calls.length = 0;
+    await runGoogleSync(engine, f.id, cfg, options, fetcher);
+    expect(calls.some(url => url.includes('syncToken=contacts-1'))).toBe(true);
+    expect(await engine.executeRaw<{ fingerprint: string }>("SELECT DISTINCT intent->>'checkpointKey' AS fingerprint FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_connector_checkpoint'", [f.id])).toEqual(checkpoints);
+  }
+}), 120_000);
+
 test('public GitHub sync imports real pages without a Git cursor or filesystem publication', async () => withEnv(env, async () => {
   for (const engine of engines) {
     const config = { kind: 'github', gh_scope: 'repos', gh_repos: 'acme-example/app', gh_token_env: 'CONNECTOR_TEST_TOKEN' };

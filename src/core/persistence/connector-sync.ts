@@ -31,6 +31,15 @@ import { LockStolenError, syncLockId, withRefreshingLock, type DbLockHandle } fr
 type ConnectorKind = 'google' | 'github';
 interface ConnectorLease { handle: DbLockHandle; signal: AbortSignal; }
 interface ConnectorSource { incarnation: string; archived: boolean; local_path: string | null; config: Record<string, unknown>; }
+// Scheduling and search-routing metadata may change after every cycle. None of
+// these fields changes the remote dataset, so they must not reset its cursor.
+const CONNECTOR_OPERATIONAL_CONFIG_KEYS = new Set([
+  'syncEnabled', 'federated', 'last_full_cycle_at', 'last_source_cycle_at',
+]);
+
+function connectorConfigIdentity(config: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(config).filter(([key]) => !CONNECTOR_OPERATIONAL_CONFIG_KEYS.has(key)));
+}
 interface ConnectorRetry {
   checkpointKey: string;
   principalId: string;
@@ -158,7 +167,7 @@ export class ManagedConnectorSync {
     private source: ConnectorSource, private authority: SyncAuthority, private binding: WorktreeBinding | null,
     private canonicalRoot: string | null, private noEmbed: boolean, private noSchemaPack: boolean, private retryFailed = false,
     private lease?: ConnectorLease) {
-    this.checkpointKey = digest({ sourceId, incarnation: source.incarnation, connector, config: source.config });
+    this.checkpointKey = digest({ sourceId, incarnation: source.incarnation, connector, config: connectorConfigIdentity(source.config) });
   }
   async assertLease(engine: BrainEngine): Promise<void> {
     if (!this.lease) return;
@@ -198,7 +207,7 @@ export class ManagedConnectorSync {
     await validateSyncAuthority(engine, this.authority, slug);
     const [source] = await engine.executeRaw<ConnectorSource>('SELECT incarnation,archived,local_path,config FROM sources WHERE id=$1', [this.sourceId]);
     if (!source || source.archived || source.incarnation !== this.source.incarnation ||
-        source.local_path !== this.source.local_path || digest(source.config) !== digest(this.source.config)) {
+        source.local_path !== this.source.local_path || digest(connectorConfigIdentity(source.config)) !== digest(connectorConfigIdentity(this.source.config))) {
       throw new OperationError('source_changed', 'The connector source changed during the sweep.');
     }
     const binding = await getWorktreeBinding(engine, this.sourceId);
@@ -301,7 +310,7 @@ export class ManagedConnectorSync {
       throw new OperationError('source_changed', 'The connector source path no longer names its canonical file.');
     }
     const intent: ConnectorIntent = { kind, connector: this.connector, sourceRoot: this.source.local_path,
-      configHash: digest(this.source.config), syncAuthority: this.authority, expected_revision: snapshot?.revision ?? null,
+      configHash: digest(connectorConfigIdentity(this.source.config)), syncAuthority: this.authority, expected_revision: snapshot?.revision ?? null,
       sourcePath, noEmbed: this.noEmbed, noSchemaPack: this.noSchemaPack, checkpointKey: this.checkpointKey, checkpointBefore: this.checkpoint,
       ownerEpoch: this.binding ? String(this.binding.owner_epoch) : null, canonicalRoot: this.canonicalRoot,
       filePath: file?.path ?? null, fileBeforeHash: file?.expectedBeforeHash ?? null, ...extra };
@@ -390,7 +399,8 @@ export async function prepareConnectorMutation(engine: BrainEngine, row: WriteRe
     await validateSyncAuthority(tx, p.syncAuthority, row.slug);
     const [source] = await tx.executeRaw<ConnectorSource>('SELECT incarnation,archived,local_path,config FROM sources WHERE id=$1', [row.source_id]);
     if (!source || source.archived || source.incarnation !== row.source_incarnation || source.config.kind !== p.connector ||
-        digest(source.config) !== p.configHash || source.local_path !== p.sourceRoot) throw new OperationError('source_changed', 'The connector configuration changed after admission.');
+        (digest(connectorConfigIdentity(source.config)) !== p.configHash && digest(source.config) !== p.configHash) ||
+        source.local_path !== p.sourceRoot) throw new OperationError('source_changed', 'The connector configuration changed after admission.');
     const binding = await getWorktreeBinding(tx, row.source_id);
     if ((binding?.worktree_id ?? null) !== row.worktree_id || (binding ? String(binding.owner_epoch) : null) !== p.ownerEpoch) {
       throw new OperationError('source_changed', 'The connector ownership binding changed after admission.');
