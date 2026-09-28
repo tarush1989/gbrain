@@ -45,6 +45,7 @@ import { createGlobalLlmHaltTracker, haltedClassOf, type GlobalLlmErrorClass } f
 import { normalizeModelId } from '../model-id.ts';
 import { writeReceipt } from '../extract/receipt-writer.ts';
 import { upsertExtractRollup, classifyRunStop } from '../extract/rollup-writer.ts';
+import { managedPersistenceEnabled } from '../persistence/ownership.ts';
 import { GBrainError } from '../types.ts';
 import { isConfigTruthy } from '../config.ts';
 import { TAKE_KIND_VALUES } from '../takes-fence.ts';
@@ -973,7 +974,14 @@ class ProposeTakesPhase extends BaseCyclePhase {
     // v0.42 Wave B3: receipt + rollup for propose_takes. Source-scoped
     // via the read scope. Receipt only when proposals actually written.
     const sourceIdForReceipt = scope.sourceId ?? 'default';
-    if (result.proposals_inserted > 0) {
+    // The receipt page goes through the legacy putPage writer, which a
+    // managed brain refuses (writer_coordinator_required). The proposals are
+    // in take_proposals and the rollup below still records the run, so skip
+    // the page there (the extract_atoms precedent) and say so in details.
+    let receipt: 'none' | 'written' | 'skipped_managed' | 'failed' = 'none';
+    if (result.proposals_inserted > 0 && await managedPersistenceEnabled(engine)) {
+      receipt = 'skipped_managed';
+    } else if (result.proposals_inserted > 0) {
       try {
         await writeReceipt(engine, {
           kind: 'takes.proposed',
@@ -987,7 +995,9 @@ class ProposeTakesPhase extends BaseCyclePhase {
             `Proposed ${result.proposals_inserted} new takes from ${result.pages_scanned} pages ` +
             `(${result.cache_hits} cached).`,
         });
+        receipt = 'written';
       } catch (err) {
+        receipt = 'failed';
         console.error(`[propose_takes] receipt write failed: ${(err as Error).message}`);
       }
     }
@@ -1039,7 +1049,7 @@ class ProposeTakesPhase extends BaseCyclePhase {
           ? `; aborted after ${result.llm_calls_failed} consecutive extractor failures (zero successes)`
           : '') +
         (warningCount > 0 ? ` (${warningCount} warning(s))` : ''),
-      details: { ...result, halted, proposal_run_id: proposalRunId, prompt_version: promptVersion },
+      details: { ...result, halted, proposal_run_id: proposalRunId, prompt_version: promptVersion, receipt },
       status: phaseFailed ? 'fail' : halted || warningCount > 0 ? 'warn' : 'ok',
     };
   }

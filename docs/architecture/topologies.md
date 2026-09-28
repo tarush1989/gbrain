@@ -542,9 +542,14 @@ consolidation uses a single source-scoped take/fact transaction. A retired or
 resolved matching take is skipped, not silently reopened. Only world-visible
 facts backed by live non-private evidence are eligible for public consolidation;
 this is no guarantee that private facts will be consolidated. Remote maintenance
-authority is not added. Legacy fence reconciliation (`dream --phase
-extract_facts`), bulk `extract-conversation-facts`,
-`conversation_facts_backfill`, and `loops_extract` remain unsupported under
+authority is not added. The `conversation_facts_backfill` Dream phase
+publishes each conversation page snapshot as one coordinated facts batch (the
+same prepare/resume/publish session as the page backstop): entity facts are
+fenced on their entity pages, unattributed facts stay DB-only, the conversation
+slug is kept as fact context, and the batch completion receipt is the page's
+durable outcome, so a replay of an unchanged page makes no provider call.
+Legacy fence reconciliation (`dream --phase extract_facts`), the bulk
+`extract-conversation-facts` CLI, and `loops_extract` remain unsupported under
 managed persistence, including preview paths that could spend. Their preflight
 refuses with `writer_coordinator_required`; writer status and activation preview
 list them in `unsupported_maintenance`. The restored `extract_facts` operation

@@ -74,6 +74,8 @@ import {
 } from '../core/facts/extract.ts';
 import { configureGatewayIfUninitialized, isAvailable, withBudgetTracker } from '../core/ai/gateway.ts';
 import { assertUnmanagedCanonicalWriter } from '../core/persistence/maintenance.ts';
+import { managedPersistenceEnabled } from '../core/persistence/ownership.ts';
+import { openConversationManagedPage, publishConversationManagedPage, type ConversationManagedPage } from '../core/facts/conversation-managed.ts';
 import { BudgetTracker, BudgetExhausted, loadPricingOverrides } from '../core/budget/budget-tracker.ts';
 import { listSources } from '../core/sources-ops.ts';
 import {
@@ -746,6 +748,8 @@ interface ExtractCoreState {
    * parser path.
    */
   llmFallbackModel: string | null;
+  /** Managed brain: publish through the coordinated facts session, never insertFacts. */
+  managed: boolean;
 }
 
 function cpMapKey(sourceId: string, slug: string): string {
@@ -934,6 +938,15 @@ async function processPage(
     return { newEndIso: null };
   }
 
+  const managed: ConversationManagedPage | null = state.managed && !state.dryRun
+    ? await openConversationManagedPage(state.engine, { sourceId: state.sourceId, slug: page.slug,
+      versionToken: snapshot.versionToken, body, source: PER_SEGMENT_SOURCE_PREFIX, signal: state.signal })
+    : null;
+  if (managed?.completed) {
+    state.result.pages_skipped_completed++;
+    return { newEndIso: null };
+  }
+
   // v0.41.13.0: thread the full Page through the orchestrator so D8
   // date-derivation chain (frontmatter.date > effective_date >
   // '1970-01-01') AND timezone_policy warnings apply. The historical
@@ -1020,7 +1033,10 @@ async function processPage(
       // orphan cleanup below until the page re-extracts.)
       !declinedUnrecognizedSpeaker
     ) {
-      if (await snapshotIsCurrent(state.engine, state.sourceId, snapshot)) {
+      if (managed && await snapshotIsCurrent(state.engine, state.sourceId, snapshot)) {
+        await publishConversationManagedPage(state.engine, managed, []);
+        state.result.pages_marked_non_extractable++;
+      } else if (!managed && await snapshotIsCurrent(state.engine, state.sourceId, snapshot)) {
         const cleaned = await deleteOrphanFactsForPage(
           state.engine,
           state.sourceId,
@@ -1061,7 +1077,8 @@ async function processPage(
   // pair before we re-extract. The lock we hold (D2 + D12 refreshing
   // lock above the caller) guarantees no other worker is writing to
   // this page right now, so the DELETE+INSERT pair is safe.
-  const cleaned = await deleteOrphanFactsForPage(state.engine, state.sourceId, page.slug);
+  // Managed replay safety is the batch identity (resume above), not a delete.
+  const cleaned = managed ? 0 : await deleteOrphanFactsForPage(state.engine, state.sourceId, page.slug);
   if (cleaned > 0) {
     state.result.orphan_facts_cleaned += cleaned;
     process.stderr.write(
@@ -1076,6 +1093,7 @@ async function processPage(
   let segmentsThisPage = 0;
   let pageInsertedTotal = 0;
   const pageResolution = emptySaveTimeResolutionCounts();
+  const managedFacts: ExtractedFact[] = [];
 
   for (const seg of segments) {
     if (state.segmentLimit > 0 && segmentsThisPage >= state.segmentLimit) break;
@@ -1105,6 +1123,7 @@ async function processPage(
         source: PER_SEGMENT_SOURCE_PREFIX,
         engine: state.engine,
         abortSignal: state.signal,
+        ...(managed ? { embedding: managed.session.embedding ?? null } : {}),
       });
       if (!extraction.ok) {
         // #3669 — rethrow BudgetExhausted UNWRAPPED. Wrapping it in a plain
@@ -1162,7 +1181,9 @@ async function processPage(
         context:
           fact.context ?? `from ${page.slug} segment ${seg.startIso}..${seg.endIso}`,
       }));
-      const ins = await state.engine.insertFacts(rows, { source_id: state.sourceId }); // gbrain-allow-direct-insert: canonical bulk extraction path for conversation pages — fences-as-system-of-record doesn't apply because conversations don't carry `## Facts` fences (the chat-log shape is the source-of-truth)
+      // Managed row numbers and fence placement belong to the coordinator.
+      if (managed) managedFacts.push(...rows.map(({ row_num: _r, source_markdown_slug: _s, ...fact }) => fact));
+      const ins = managed ? { inserted: 0 } : await state.engine.insertFacts(rows, { source_id: state.sourceId }); // gbrain-allow-direct-insert: canonical bulk extraction path for conversation pages — fences-as-system-of-record doesn't apply because conversations don't carry `## Facts` fences (the chat-log shape is the source-of-truth)
       pageInsertedTotal += ins.inserted;
       state.result.facts_inserted += ins.inserted;
     }
@@ -1187,8 +1208,13 @@ async function processPage(
   ) {
     // A terminal insert is part of the page transaction contract. Propagate
     // failure so bulk accounting, CLI exit status, cycle status, and rollups all
-    // report the page as unfinished.
-    await writeTerminalAuditRow(
+    // report the page as unfinished. Managed: the page's one coordinated batch
+    // carries its facts and its completion receipt together.
+    if (managed) {
+      const published = await publishConversationManagedPage(state.engine, managed, managedFacts);
+      pageInsertedTotal += published.inserted;
+      state.result.facts_inserted += published.inserted;
+    } else await writeTerminalAuditRow(
       state.engine,
       state.sourceId,
       page.slug,
@@ -1291,7 +1317,10 @@ export async function runExtractConversationFactsCore(
   if (!sourceId) {
     throw new Error('runExtractConversationFactsCore: opts.sourceId is required');
   }
-  await assertUnmanagedCanonicalWriter(engine, 'bulk conversation fact extraction');
+  const managed = await managedPersistenceEnabled(engine);
+  if (managed && opts.segmentLimit) {
+    throw new Error('segment limits are unsupported on a managed brain: a partial page cannot carry a completion receipt');
+  }
 
   const result: ExtractConversationFactsResult = {
     pages_considered: 0,
@@ -1381,6 +1410,7 @@ export async function runExtractConversationFactsCore(
     extractor: opts.extractor,
     cpMap: new Map(),
     llmFallbackModel,
+    managed,
   };
 
   // Run body. Either inside the externally-provided tracker scope (no
@@ -1676,8 +1706,10 @@ async function writeRunReceiptAndRollup(
   // receipt slug. shortRunId() truncates to 8 chars.
   const runId = `ecf-${Date.now().toString(36)}-${sourceId.slice(0, 4)}`;
 
-  // Receipt write: only when the run actually inserted facts.
-  if (result.facts_inserted > 0) {
+  // Receipt write: only when the run actually inserted facts. The receipt is a
+  // legacy putPage a managed brain refuses; there the committed facts batches
+  // are the receipts (the propose_takes / extract_atoms precedent).
+  if (result.facts_inserted > 0 && !(await managedPersistenceEnabled(engine))) {
     try {
       await writeReceipt(engine, {
         kind: 'facts.conversation',
