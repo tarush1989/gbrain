@@ -29,7 +29,42 @@ export interface ConversationManagedPage {
   completed: ManagedFactsResult | null;
 }
 
+/**
+ * Waits between session-open attempts while the canonical writer lock is busy.
+ * The session probe never waits, and the previous page's coordinated publish
+ * can still hold the worktree lock when the next page opens (live 2026-09-29:
+ * 5 pages failed in the same second as the prior page's publish).
+ */
+export const WRITER_BUSY_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000] as const;
+
+const isWriterBusy = (error: unknown) => (error as { code?: string } | null)?.code === 'writer_lock_unavailable';
+
+function pause(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const onAbort = () => { clearTimeout(timer); reject(signal!.reason); };
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 export async function openConversationManagedPage(engine: BrainEngine, input: {
+  sourceId: string; slug: string; versionToken: string; body: string; source: string; signal?: AbortSignal;
+  retryDelaysMs?: readonly number[];
+}): Promise<ConversationManagedPage> {
+  const delays = input.retryDelaysMs ?? WRITER_BUSY_RETRY_DELAYS_MS;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await openOnce(engine, input);
+    } catch (error) {
+      // Only a busy lock is transient; the page still fails if it stays busy.
+      if (!isWriterBusy(error) || attempt >= delays.length) throw error;
+      await pause(delays[attempt]!, input.signal);
+    }
+  }
+}
+
+async function openOnce(engine: BrainEngine, input: {
   sourceId: string; slug: string; versionToken: string; body: string; source: string; signal?: AbortSignal;
 }): Promise<ConversationManagedPage> {
   const ctx: FactsBackstopCtx = {
