@@ -56,7 +56,7 @@ jobs:
         timeout-minutes: 10
         run: |
           set -euo pipefail
-          docker compose -f docker-compose.ci.yml run --rm runner bash -c '
+          docker compose -f docker-compose.ci.yml run --rm --no-deps runner bash -c '
             set -euo pipefail
             git config --global --add safe.directory "*"
             bun install --frozen-lockfile
