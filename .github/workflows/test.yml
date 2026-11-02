@@ -1,10 +1,15 @@
-name: Inline cycle contribution preflight
+name: Inline cycle remaining native checks (diagnostic)
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  complete-free-gate:
+  remaining-native-partition:
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: [1, 2, 3, 4]
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
@@ -52,19 +57,73 @@ jobs:
           RUN apt-get update -qq && apt-get install -y -qq git ca-certificates python3 procps postgresql-client jq build-essential curl
           DOCKERFILE
           docker compose -f docker-compose.ci.yml pull postgres-1 postgres-2 postgres-3 postgres-4 pgbouncer
-      - name: Measure cold typecheck alone and prepare its native incremental cache
-        timeout-minutes: 10
-        run: |
-          set -euo pipefail
-          docker compose -f docker-compose.ci.yml run --rm --no-deps runner bash -c '
-            set -euo pipefail
-            git config --global --add safe.directory "*"
-            bun install --frozen-lockfile
-            cold_start=$SECONDS
-            bun run typecheck
-            echo "Cold isolated typecheck completed in $((SECONDS - cold_start)) seconds; the native 120s verify gate is unchanged."
-          '
-      - name: Run existing complete container CI gate off production
+      - name: Run only unfinished native unit and E2E partition; no full-suite claim
         env:
           CI: 'true'
-        run: bash scripts/ci-local.sh --no-pull
+        run: |
+          set -euo pipefail
+          mkdir -p .context
+          trap 'docker compose -f docker-compose.ci.yml down --remove-orphans' EXIT
+          docker compose -f docker-compose.ci.yml up -d postgres-1 postgres-2 postgres-3 postgres-4 pgbouncer
+          cat > "$RUNNER_TEMP/remaining-native.sh" <<'NATIVE_REMAINING'
+          set -euo pipefail
+          echo "[runner] bun version: $(bun --version)"
+          # Test prerequisites may be missing even in a warm runner image: git backs
+          # fixture repos, python3 backs security scans and argv recorders, and ps backs
+          # live-process / PID-reuse lock checks. psql cleans up connections between E2E
+          # files. None are application dependencies.
+          if ! command -v git >/dev/null 2>&1 || \
+             ! command -v python3 >/dev/null 2>&1 || \
+             ! command -v ps >/dev/null 2>&1 || \
+             ! command -v psql >/dev/null 2>&1 || \
+             ! command -v cc >/dev/null 2>&1 || \
+             ! command -v jq >/dev/null 2>&1; then
+            echo "[runner] Installing test prerequisites (debian apt)..."
+            apt-get update -qq >/dev/null
+            apt-get install -y -qq git ca-certificates python3 procps postgresql-client jq build-essential >/dev/null
+          fi
+          # Container runs as root (uid 0) against a host-uid bind-mount; mark repo +
+          # any worktree gitdir as safe so `git status` etc. don't refuse.
+          git config --global --add safe.directory '*' || true
+          # #6756: the admin/dist volume starts empty on a fresh checkout; make it the worktree's bytes.
+          bash scripts/ci-hydrate-admin-dist.sh /ci-src/admin-dist admin/dist
+          # Revalidate even a warm dependency volume against this checkout's lockfile.
+          echo "[runner] bun install --frozen-lockfile"
+          bun install --frozen-lockfile
+          echo "[runner] compiling isolated Linux CLI for executable security checks"
+          bun run build
+          set -euo pipefail
+          shard="$CI_REMAINING_SHARD"
+          test "$shard" -ge 1 && test "$shard" -le 4
+          export GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar
+          export GBRAIN_TEST_TIMEOUT_MULTIPLIER=6
+          export GBRAIN_TEST_RECEIPT_DIR=/app/.context/remaining-receipts
+          bun run build:pglite-snapshot
+          bun scripts/lib/ensure-e2e-database.ts postgresql://postgres:postgres@postgres-1:5432/gbrain_test gbrain_ci_admin_test
+          printf '[remaining] native unit shard %s/4\n' "$shard"
+          env -u DATABASE_URL -u GBRAIN_DATABASE_URL SHARD="${shard}/4" bash scripts/run-unit-shard.sh
+          printf '[remaining] native e2e shard %s/4\n' "$shard"
+          SHARD="${shard}/4" \
+          DATABASE_URL="postgresql://postgres:postgres@postgres-${shard}:5432/gbrain_test" \
+          GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer_test \
+          GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_ci_admin_test \
+          GBRAIN_PGBOUNCER_E2E_DB="gbrain_pooled_${shard}_test" \
+          GBRAIN_CI_REQUIRE_PGBOUNCER=1 GBRAIN_TEST_DB=1 \
+          bash scripts/run-e2e.sh
+          printf '[remaining] partition %s/4 complete\n' "$shard"
+
+          NATIVE_REMAINING
+          docker compose -f docker-compose.ci.yml run --rm \
+            -e CI_REMAINING_SHARD="${{ matrix.shard }}" \
+            -e GITHUB_SHA=ce0e2b76e6cadc83645c6547e64d867bd2013cc2 \
+            -e GITHUB_RUN_ID="$GITHUB_RUN_ID" \
+            -v "$RUNNER_TEMP/remaining-native.sh:/remaining-native.sh:ro" \
+            runner bash /remaining-native.sh 2>&1 | tee .context/remaining-native.log
+      - name: Retain partition output and native execution receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: remaining-native-${{ matrix.shard }}-${{ github.run_id }}
+          path: .context/
+          retention-days: 7
+          if-no-files-found: warn
