@@ -1,10 +1,10 @@
-name: Robot pooler topology controlled comparison
+name: Graduation pooler topology controlled comparison
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  robot-pooler-topology:
+  graduation-pooler-topology:
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -96,14 +96,14 @@ jobs:
           export GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar
           export GBRAIN_TEST_TIMEOUT_MULTIPLIER=6
           case "$CI_TOPOLOGY" in
-            mismatched) direct_host=postgres-2 ;;
+            mismatched) direct_host=postgres-4 ;;
             colocated) direct_host=postgres-1 ;;
             *) exit 2 ;;
           esac
           export DATABASE_URL="postgresql://postgres:postgres@${direct_host}:5432/gbrain_test"
           export GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer_test
           export GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_ci_admin_test
-          export GBRAIN_PGBOUNCER_E2E_DB=gbrain_robot_topology_test
+          export GBRAIN_PGBOUNCER_E2E_DB=gbrain_graduation_topology_test
           export GBRAIN_CI_REQUIRE_PGBOUNCER=1 GBRAIN_TEST_DB=1
           probe_db="gbrain_topology_probe_test_$(python3 -c 'import uuid;print(uuid.uuid4().hex)')"
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE DATABASE $probe_db"
@@ -116,7 +116,7 @@ jobs:
           for trial in $(seq 1 10); do
             export GBRAIN_TEST_RECEIPT_DIR="/ci-results/native-receipts/trial-${trial}"
             set +e
-            bash scripts/run-e2e.sh test/e2e/persistence-robot-fixture-release.test.ts > "/ci-results/trial-${trial}.log" 2>&1
+            bash scripts/run-e2e.sh test/e2e/graduation-cli-topologies.test.ts > "/ci-results/trial-${trial}.log" 2>&1
             native_rc=$?
             set -e
             printf '{"trial":%s,"native_exit":%s}\n' "$trial" "$native_rc" | tee -a /ci-results/trials.jsonl
@@ -135,7 +135,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: robot-topology-${{ matrix.source.name }}-${{ matrix.topology }}-${{ github.run_id }}
+          name: graduation-topology-${{ matrix.source.name }}-${{ matrix.topology }}-${{ github.run_id }}
           path: ${{ runner.temp }}/facts-results/
           retention-days: 7
           if-no-files-found: error
