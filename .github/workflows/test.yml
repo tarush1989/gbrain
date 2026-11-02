@@ -1,24 +1,24 @@
-name: Inline cycle remaining native E2E partitions (diagnostic)
+name: Installed542 native managed extraction storage fixtures
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  remaining-native-e2e:
+  installed542-managed-facts:
     strategy:
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 2
       matrix:
-        shard: [2, 3, 4]
+        backend: [pglite, postgres]
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 30
     env:
       GBRAIN_CI_BUN_TAG: contribution-1.4.4-curl
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: tarush1989/gbrain
-          ref: ce0e2b76e6cadc83645c6547e64d867bd2013cc2
+          ref: ca1281a2ed3236ac45adddb2d08e84423769c321
           fetch-depth: 0
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
@@ -27,10 +27,8 @@ jobs:
       - name: Verify exact product source and comparison base
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "ce0e2b76e6cadc83645c6547e64d867bd2013cc2"
+          test "$(git rev-parse HEAD)" = "ca1281a2ed3236ac45adddb2d08e84423769c321"
           git remote set-url origin https://github.com/garrytan/gbrain.git
-          git fetch origin a131fb20ef4aafd017f0c6a6565ce5627dc46897:refs/remotes/origin/master
-          test "$(git rev-parse origin/master)" = a131fb20ef4aafd017f0c6a6565ce5627dc46897
           git status --short
           test "$(id -u)" = 1001
           nproc
@@ -64,8 +62,8 @@ jobs:
           CI: 'true'
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/e2e-results"
-          chmod 0777 "$RUNNER_TEMP/e2e-results"
+          mkdir -p "$RUNNER_TEMP/facts-results"
+          chmod 0777 "$RUNNER_TEMP/facts-results"
           docker compose -f docker-compose.ci.yml up -d postgres-1 postgres-2 postgres-3 postgres-4 pgbouncer
           docker compose -f docker-compose.ci.yml run --rm runner bash -ec '
             git config --global --add safe.directory "*"
@@ -77,45 +75,55 @@ jobs:
             id ci-test
             chown -R 1001:1001 /app
           '
-      - name: Run only the not-yet-executed native E2E partition as the checkout owner
+      - name: Run existing native managed-facts fixtures on the exact installed SDK source
         env:
           CI: 'true'
         run: |
           set -euo pipefail
-          cat > "$RUNNER_TEMP/e2e-native.sh" <<'NATIVE_E2E'
+          cat > "$RUNNER_TEMP/facts-native.sh" <<'NATIVE_FACTS'
           set -euo pipefail
-          export HOME=/tmp/native-e2e-outer-home
+          export HOME=/tmp/native-facts-outer-home
           mkdir -p "$HOME"
           git config --global --add safe.directory '*'
           id
-          git update-index --refresh
-          git status --short
           test "$(id -u)" = 1001
+          test "$(git rev-parse HEAD)" = ca1281a2ed3236ac45adddb2d08e84423769c321
+          export GBRAIN_SKIP_STARTUP_HOOKS=1
+          bun --no-env-file --config=/dev/null src/index.ts --version
           export GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar
           export GBRAIN_TEST_TIMEOUT_MULTIPLIER=6
           export GBRAIN_TEST_RECEIPT_DIR=/ci-results/native-receipts
-          export SHARD="${CI_E2E_SHARD}/4"
-          export DATABASE_URL="postgresql://postgres:postgres@postgres-${CI_E2E_SHARD}:5432/gbrain_test"
-          export GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer_test
-          export GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_ci_admin_test
-          export GBRAIN_PGBOUNCER_E2E_DB="gbrain_pooled_${CI_E2E_SHARD}_test"
-          export GBRAIN_CI_REQUIRE_PGBOUNCER=1 GBRAIN_TEST_DB=1
-          bash scripts/run-e2e.sh
-          NATIVE_E2E
+          # Existing upstream cases inject their extractor. No Teams/ChatGPT/API
+          # credentials or real user source are copied into this test container.
+          case "$CI_FACTS_BACKEND" in
+            pglite)
+              env -u DATABASE_URL -u GBRAIN_DATABASE_URL bash scripts/run-unit-shard.sh test/conversation-facts-managed.test.ts
+              ;;
+            postgres)
+              export DATABASE_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test
+              export GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer_test
+              export GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_ci_admin_test
+              export GBRAIN_PGBOUNCER_E2E_DB=gbrain_managed_facts_test
+              export GBRAIN_CI_REQUIRE_PGBOUNCER=1 GBRAIN_TEST_DB=1
+              bash scripts/run-e2e.sh test/e2e/conversation-facts-managed-postgres.test.ts
+              ;;
+            *) echo 'unsupported fixture backend' >&2; exit 2 ;;
+          esac
+          NATIVE_FACTS
           docker compose -f docker-compose.ci.yml run --rm \
             --user 1001:1001 \
-            -e CI='true' -e CI_E2E_SHARD="${{ matrix.shard }}" \
-            -e GITHUB_SHA=ce0e2b76e6cadc83645c6547e64d867bd2013cc2 \
+            -e CI='true' -e CI_FACTS_BACKEND="${{ matrix.backend }}" \
+            -e GITHUB_SHA=ca1281a2ed3236ac45adddb2d08e84423769c321 \
             -e GITHUB_RUN_ID="$GITHUB_RUN_ID" \
-            -v "$RUNNER_TEMP/e2e-native.sh:/e2e-native.sh:ro" \
-            -v "$RUNNER_TEMP/e2e-results:/ci-results" \
-            runner bash /e2e-native.sh 2>&1 | tee "$RUNNER_TEMP/e2e-results/native-e2e.log"
+            -v "$RUNNER_TEMP/facts-native.sh:/facts-native.sh:ro" \
+            -v "$RUNNER_TEMP/facts-results:/ci-results" \
+            runner bash /facts-native.sh 2>&1 | tee "$RUNNER_TEMP/facts-results/native-facts.log"
       - name: Retain explicit synthetic diagnostic results and native receipts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: remaining-e2e-${{ matrix.shard }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/e2e-results/
+          name: sdk542-managed-facts-${{ matrix.backend }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/facts-results/
           retention-days: 7
           if-no-files-found: error
       - name: Stop only this disposable test stack
