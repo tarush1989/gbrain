@@ -1,36 +1,24 @@
-name: Inline cycle failed-file environment comparison (diagnostic)
+name: Inline cycle remaining native E2E partitions (diagnostic)
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  failed-file-environment:
+  remaining-native-e2e:
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 3
       matrix:
-        include:
-          - revision: baseline
-            product_sha: a131fb20ef4aafd017f0c6a6565ce5627dc46897
-            uid: '0'
-          - revision: baseline
-            product_sha: a131fb20ef4aafd017f0c6a6565ce5627dc46897
-            uid: '1001'
-          - revision: candidate
-            product_sha: ce0e2b76e6cadc83645c6547e64d867bd2013cc2
-            uid: '0'
-          - revision: candidate
-            product_sha: ce0e2b76e6cadc83645c6547e64d867bd2013cc2
-            uid: '1001'
+        shard: [2, 3, 4]
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
       GBRAIN_CI_BUN_TAG: contribution-1.4.4-curl
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: tarush1989/gbrain
-          ref: ${{ matrix.product_sha }}
+          ref: ce0e2b76e6cadc83645c6547e64d867bd2013cc2
           fetch-depth: 0
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
@@ -39,7 +27,7 @@ jobs:
       - name: Verify exact product source and comparison base
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${{ matrix.product_sha }}"
+          test "$(git rev-parse HEAD)" = "ce0e2b76e6cadc83645c6547e64d867bd2013cc2"
           git remote set-url origin https://github.com/garrytan/gbrain.git
           git fetch origin a131fb20ef4aafd017f0c6a6565ce5627dc46897:refs/remotes/origin/master
           test "$(git rev-parse origin/master)" = a131fb20ef4aafd017f0c6a6565ce5627dc46897
@@ -76,8 +64,8 @@ jobs:
           CI: 'true'
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/failure-results"
-          chmod 0777 "$RUNNER_TEMP/failure-results"
+          mkdir -p "$RUNNER_TEMP/e2e-results"
+          chmod 0777 "$RUNNER_TEMP/e2e-results"
           docker compose -f docker-compose.ci.yml up -d postgres-1 postgres-2 postgres-3 postgres-4 pgbouncer
           docker compose -f docker-compose.ci.yml run --rm runner bash -ec '
             git config --global --add safe.directory "*"
@@ -85,81 +73,49 @@ jobs:
             bun install --frozen-lockfile
             bun run build
             bun run build:pglite-snapshot
+            bun scripts/lib/ensure-e2e-database.ts postgresql://postgres:postgres@postgres-1:5432/gbrain_test gbrain_ci_admin_test
             id ci-test
             chown -R 1001:1001 /app
           '
-      - name: Compare only eight failed files, ten counted trials; never a full-suite green
+      - name: Run only the not-yet-executed native E2E partition as the checkout owner
         env:
           CI: 'true'
         run: |
           set -euo pipefail
-          cat > "$RUNNER_TEMP/failure-native.sh" <<'NATIVE_FAILURES'
+          cat > "$RUNNER_TEMP/e2e-native.sh" <<'NATIVE_E2E'
           set -euo pipefail
-          export HOME=/tmp/ci-failure-outer-home
+          export HOME=/tmp/native-e2e-outer-home
           mkdir -p "$HOME"
           git config --global --add safe.directory '*'
           id
           git update-index --refresh
           git status --short
-          # Forced probe: same chmod000 object, root can still read; unprivileged UID1001 cannot.
-          python3 - <<'PROBE'
-          import os,tempfile,pathlib,json,subprocess
-          folder=pathlib.Path(tempfile.mkdtemp(prefix='permission-probe-'))
-          file=folder/'mode000';file.write_text('synthetic');file.chmod(0)
-          outcomes=[]
-          for trial in range(10):
-              try:file.read_text();outcomes.append('readable')
-              except PermissionError:outcomes.append('permission_denied')
-          file.chmod(0o600);file.unlink();folder.rmdir()
-          print(json.dumps({'diagnostic':'permission_probe','uid':os.getuid(),'trials':outcomes}))
-          isolated=pathlib.Path(tempfile.mkdtemp(prefix='git-home-probe-'))
-          env=dict(os.environ,HOME=str(isolated))
-          result=subprocess.run(['git','status','--porcelain'],env=env,text=True,capture_output=True)
-          print(json.dumps({'diagnostic':'isolated_home_git','uid':os.getuid(),'exit_code':result.returncode,'stderr':result.stderr}))
-          isolated.rmdir()
-          PROBE
+          test "$(id -u)" = 1001
           export GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar
           export GBRAIN_TEST_TIMEOUT_MULTIPLIER=6
-          for trial in $(seq 1 10); do
-            export GBRAIN_TEST_RECEIPT_DIR="/ci-results/trial-${trial}"
-            set +e
-            env -u DATABASE_URL -u GBRAIN_DATABASE_URL bash scripts/run-unit-shard.sh \
-              test/persistence-worktree-refresh.test.ts \
-              test/doctor-content-golden.test.ts \
-              test/cycle/concept-publication-file-recheck.test.ts \
-              test/doctor-hot-checks-golden.test.ts \
-              test/doctor-json-golden.test.ts \
-              test/sync-unreadable-file-gbra130.test.ts \
-              test/scripts/e2e-runner.test.ts \
-              test/doctor-not-verified-5432.test.ts \
-              2>&1 | tee "/ci-results/trial-${trial}.log"
-            codes=("${PIPESTATUS[@]}")
-            set -e
-            python3 - "$trial" "${codes[0]}" "${codes[1]}" <<'RECEIPT'
-          import sys,json,pathlib,os
-          row={'trial':int(sys.argv[1]),'uid':os.getuid(),'native_exit':int(sys.argv[2]),'tee_exit':int(sys.argv[3]),'diagnostic_only':True,'full_suite_gate':False}
-          with pathlib.Path('/ci-results/trials.jsonl').open('a') as file:file.write(json.dumps(row)+'\n')
-          print(json.dumps(row))
-          RECEIPT
-            test "${codes[1]}" -eq 0
-            # Ordinary failures are measured, never retried to get a green gate.
-            # Infrastructure/usage failures stop this diagnostic and preserve partials.
-            test "${codes[0]}" -le 1
-          done
-          NATIVE_FAILURES
+          export GBRAIN_TEST_RECEIPT_DIR=/ci-results/native-receipts
+          export SHARD="${CI_E2E_SHARD}/4"
+          export DATABASE_URL="postgresql://postgres:postgres@postgres-${CI_E2E_SHARD}:5432/gbrain_test"
+          export GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer_test
+          export GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_ci_admin_test
+          export GBRAIN_PGBOUNCER_E2E_DB="gbrain_pooled_${CI_E2E_SHARD}_test"
+          export GBRAIN_CI_REQUIRE_PGBOUNCER=1 GBRAIN_TEST_DB=1
+          bash scripts/run-e2e.sh
+          NATIVE_E2E
           docker compose -f docker-compose.ci.yml run --rm \
-            --user "${{ matrix.uid }}:${{ matrix.uid }}" \
-            -e CI='true' -e GITHUB_SHA="${{ matrix.product_sha }}" \
+            --user 1001:1001 \
+            -e CI='true' -e CI_E2E_SHARD="${{ matrix.shard }}" \
+            -e GITHUB_SHA=ce0e2b76e6cadc83645c6547e64d867bd2013cc2 \
             -e GITHUB_RUN_ID="$GITHUB_RUN_ID" \
-            -v "$RUNNER_TEMP/failure-native.sh:/failure-native.sh:ro" \
-            -v "$RUNNER_TEMP/failure-results:/ci-results" \
-            runner bash /failure-native.sh 2>&1 | tee "$RUNNER_TEMP/failure-results/native-comparison.log"
+            -v "$RUNNER_TEMP/e2e-native.sh:/e2e-native.sh:ro" \
+            -v "$RUNNER_TEMP/e2e-results:/ci-results" \
+            runner bash /e2e-native.sh 2>&1 | tee "$RUNNER_TEMP/e2e-results/native-e2e.log"
       - name: Retain explicit synthetic diagnostic results and native receipts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: failed-files-${{ matrix.revision }}-uid${{ matrix.uid }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/failure-results/
+          name: remaining-e2e-${{ matrix.shard }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/e2e-results/
           retention-days: 7
           if-no-files-found: error
       - name: Stop only this disposable test stack
