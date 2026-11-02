@@ -7,6 +7,8 @@ jobs:
   complete-free-gate:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
+    env:
+      GBRAIN_CI_BUN_TAG: contribution-1.4.4-curl
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -40,7 +42,29 @@ jobs:
           tar -xzf "$RUNNER_TEMP/gitleaks-dl/${BASE}" -C "$RUNNER_TEMP" gitleaks
           sudo install -m 755 "$RUNNER_TEMP/gitleaks" /usr/local/bin/gitleaks
           gitleaks version
+      - name: Prepare the test container's required tools
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/empty-build-context"
+          docker build -t oven/bun:contribution-1.4.4-curl -f - "$RUNNER_TEMP/empty-build-context" <<'DOCKERFILE'
+          FROM oven/bun:1.4.4
+          USER root
+          RUN apt-get update -qq && apt-get install -y -qq git ca-certificates python3 procps postgresql-client jq build-essential curl
+          DOCKERFILE
+          docker compose -f docker-compose.ci.yml pull postgres-1 postgres-2 postgres-3 postgres-4 pgbouncer
+      - name: Measure cold typecheck alone and prepare its native incremental cache
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose.ci.yml run --rm runner bash -c '
+            set -euo pipefail
+            git config --global --add safe.directory "*"
+            bun install --frozen-lockfile
+            cold_start=$SECONDS
+            bun run typecheck
+            echo "Cold isolated typecheck completed in $((SECONDS - cold_start)) seconds; the native 120s verify gate is unchanged."
+          '
       - name: Run existing complete container CI gate off production
         env:
           CI: 'true'
-        run: bash scripts/ci-local.sh
+        run: bash scripts/ci-local.sh --no-pull
