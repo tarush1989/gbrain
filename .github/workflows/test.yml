@@ -1,15 +1,20 @@
-name: Installed542 native managed extraction storage fixtures
+name: Robot pooler topology controlled comparison
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  installed542-managed-facts:
+  robot-pooler-topology:
     strategy:
       fail-fast: false
       max-parallel: 2
       matrix:
-        backend: [pglite, postgres]
+        source:
+          - name: upstream
+            sha: a131fb20ef4aafd017f0c6a6565ce5627dc46897
+          - name: candidate
+            sha: ce0e2b76e6cadc83645c6547e64d867bd2013cc2
+        topology: [mismatched, colocated]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -18,7 +23,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: tarush1989/gbrain
-          ref: ca1281a2ed3236ac45adddb2d08e84423769c321
+          ref: ${{ matrix.source.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
@@ -27,7 +32,7 @@ jobs:
       - name: Verify exact product source and comparison base
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "ca1281a2ed3236ac45adddb2d08e84423769c321"
+          test "$(git rev-parse HEAD)" = "${{ matrix.source.sha }}"
           git remote set-url origin https://github.com/garrytan/gbrain.git
           git status --short
           test "$(id -u)" = 1001
@@ -75,54 +80,62 @@ jobs:
             id ci-test
             chown -R 1001:1001 /app
           '
-      - name: Run existing native managed-facts fixtures on the exact installed SDK source
+      - name: Count ten native trials and a forced topology probe
         env:
           CI: 'true'
         run: |
           set -euo pipefail
-          cat > "$RUNNER_TEMP/facts-native.sh" <<'NATIVE_FACTS'
+          cat > "$RUNNER_TEMP/topology-native.sh" <<'NATIVE_TOPOLOGY'
           set -euo pipefail
-          export HOME=/tmp/native-facts-outer-home
+          export HOME=/tmp/native-topology-outer-home
           mkdir -p "$HOME"
-          git config --global --add safe.directory '*'
-          id
           test "$(id -u)" = 1001
-          test "$(git rev-parse HEAD)" = ca1281a2ed3236ac45adddb2d08e84423769c321
+          test "$(git rev-parse HEAD)" = "$CI_PRODUCT_SHA"
           export GBRAIN_SKIP_STARTUP_HOOKS=1
           ./bin/gbrain --version
           export GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar
           export GBRAIN_TEST_TIMEOUT_MULTIPLIER=6
-          export GBRAIN_TEST_RECEIPT_DIR=/ci-results/native-receipts
-          # Existing upstream cases inject their extractor. No Teams/ChatGPT/API
-          # credentials or real user source are copied into this test container.
-          case "$CI_FACTS_BACKEND" in
-            pglite)
-              env -u DATABASE_URL -u GBRAIN_DATABASE_URL bash scripts/run-unit-shard.sh test/conversation-facts-managed.test.ts
-              ;;
-            postgres)
-              export DATABASE_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test
-              export GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer_test
-              export GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_ci_admin_test
-              export GBRAIN_PGBOUNCER_E2E_DB=gbrain_managed_facts_test
-              export GBRAIN_CI_REQUIRE_PGBOUNCER=1 GBRAIN_TEST_DB=1
-              bash scripts/run-e2e.sh test/e2e/conversation-facts-managed-postgres.test.ts
-              ;;
-            *) echo 'unsupported fixture backend' >&2; exit 2 ;;
+          case "$CI_TOPOLOGY" in
+            mismatched) direct_host=postgres-2 ;;
+            colocated) direct_host=postgres-1 ;;
+            *) exit 2 ;;
           esac
-          NATIVE_FACTS
+          export DATABASE_URL="postgresql://postgres:postgres@${direct_host}:5432/gbrain_test"
+          export GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer_test
+          export GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_ci_admin_test
+          export GBRAIN_PGBOUNCER_E2E_DB=gbrain_robot_topology_test
+          export GBRAIN_CI_REQUIRE_PGBOUNCER=1 GBRAIN_TEST_DB=1
+          probe_db="gbrain_topology_probe_test_$(python3 -c 'import uuid;print(uuid.uuid4().hex)')"
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE DATABASE $probe_db"
+          direct_count=$(psql "$DATABASE_URL" -At -c "SELECT count(*) FROM pg_database WHERE datname='$probe_db'")
+          pooler_host_count=$(psql "$GBRAIN_PGBOUNCER_DIRECT_URL" -At -c "SELECT count(*) FROM pg_database WHERE datname='$probe_db'")
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "DROP DATABASE $probe_db"
+          printf '{"topology":"%s","direct_database_count":%s,"pooler_host_database_count":%s}\n' "$CI_TOPOLOGY" "$direct_count" "$pooler_host_count" | tee /ci-results/forced-probe.json
+          # Every trial is counted. Nonzero native exits are retained, never retried
+          # as a way to turn the suite green. This job collects diagnostics only.
+          for trial in $(seq 1 10); do
+            export GBRAIN_TEST_RECEIPT_DIR="/ci-results/native-receipts/trial-${trial}"
+            set +e
+            bash scripts/run-e2e.sh test/e2e/persistence-robot-fixture-release.test.ts > "/ci-results/trial-${trial}.log" 2>&1
+            native_rc=$?
+            set -e
+            printf '{"trial":%s,"native_exit":%s}\n' "$trial" "$native_rc" | tee -a /ci-results/trials.jsonl
+          done
+          NATIVE_TOPOLOGY
           docker compose -f docker-compose.ci.yml run --rm \
             --user 1001:1001 \
-            -e CI='true' -e CI_FACTS_BACKEND="${{ matrix.backend }}" \
-            -e GITHUB_SHA=ca1281a2ed3236ac45adddb2d08e84423769c321 \
+            -e CI='true' -e CI_TOPOLOGY="${{ matrix.topology }}" \
+            -e CI_PRODUCT_SHA="${{ matrix.source.sha }}" \
+            -e GITHUB_SHA="${{ matrix.source.sha }}" \
             -e GITHUB_RUN_ID="$GITHUB_RUN_ID" \
-            -v "$RUNNER_TEMP/facts-native.sh:/facts-native.sh:ro" \
+            -v "$RUNNER_TEMP/topology-native.sh:/topology-native.sh:ro" \
             -v "$RUNNER_TEMP/facts-results:/ci-results" \
-            runner bash /facts-native.sh 2>&1 | tee "$RUNNER_TEMP/facts-results/native-facts.log"
+            runner bash /topology-native.sh 2>&1 | tee "$RUNNER_TEMP/facts-results/collection.log"
       - name: Retain explicit synthetic diagnostic results and native receipts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: sdk542-managed-facts-${{ matrix.backend }}-${{ github.run_id }}
+          name: robot-topology-${{ matrix.source.name }}-${{ matrix.topology }}-${{ github.run_id }}
           path: ${{ runner.temp }}/facts-results/
           retention-days: 7
           if-no-files-found: error
