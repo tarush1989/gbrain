@@ -1,24 +1,36 @@
-name: Inline cycle remaining native checks (diagnostic)
+name: Inline cycle failed-file environment comparison (diagnostic)
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  remaining-native-partition:
+  failed-file-environment:
     strategy:
       fail-fast: false
       max-parallel: 4
       matrix:
-        shard: [1, 2, 3, 4]
+        include:
+          - revision: baseline
+            product_sha: a131fb20ef4aafd017f0c6a6565ce5627dc46897
+            uid: '0'
+          - revision: baseline
+            product_sha: a131fb20ef4aafd017f0c6a6565ce5627dc46897
+            uid: '1001'
+          - revision: candidate
+            product_sha: ce0e2b76e6cadc83645c6547e64d867bd2013cc2
+            uid: '0'
+          - revision: candidate
+            product_sha: ce0e2b76e6cadc83645c6547e64d867bd2013cc2
+            uid: '1001'
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 60
     env:
       GBRAIN_CI_BUN_TAG: contribution-1.4.4-curl
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: tarush1989/gbrain
-          ref: ce0e2b76e6cadc83645c6547e64d867bd2013cc2
+          ref: ${{ matrix.product_sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
@@ -27,11 +39,12 @@ jobs:
       - name: Verify exact product source and comparison base
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = ce0e2b76e6cadc83645c6547e64d867bd2013cc2
+          test "$(git rev-parse HEAD)" = "${{ matrix.product_sha }}"
           git remote set-url origin https://github.com/garrytan/gbrain.git
           git fetch origin a131fb20ef4aafd017f0c6a6565ce5627dc46897:refs/remotes/origin/master
           test "$(git rev-parse origin/master)" = a131fb20ef4aafd017f0c6a6565ce5627dc46897
           git status --short
+          test "$(id -u)" = 1001
           nproc
           free -m
       - name: Install existing pinned gitleaks CLI
@@ -55,75 +68,100 @@ jobs:
           FROM oven/bun:1.4.4
           USER root
           RUN apt-get update -qq && apt-get install -y -qq git ca-certificates python3 procps postgresql-client jq build-essential curl
+          RUN groupadd --gid 1001 ci-test && useradd --uid 1001 --gid 1001 --create-home ci-test
           DOCKERFILE
           docker compose -f docker-compose.ci.yml pull postgres-1 postgres-2 postgres-3 postgres-4 pgbouncer
-      - name: Run only unfinished native unit and E2E partition; no full-suite claim
+      - name: Prepare identical native tools and snapshot before selecting the test UID
         env:
           CI: 'true'
         run: |
           set -euo pipefail
-          mkdir -p .context
-          trap 'docker compose -f docker-compose.ci.yml down --remove-orphans' EXIT
+          mkdir -p "$RUNNER_TEMP/failure-results"
+          chmod 0777 "$RUNNER_TEMP/failure-results"
           docker compose -f docker-compose.ci.yml up -d postgres-1 postgres-2 postgres-3 postgres-4 pgbouncer
-          cat > "$RUNNER_TEMP/remaining-native.sh" <<'NATIVE_REMAINING'
+          docker compose -f docker-compose.ci.yml run --rm runner bash -ec '
+            git config --global --add safe.directory "*"
+            bash scripts/ci-hydrate-admin-dist.sh /ci-src/admin-dist admin/dist
+            bun install --frozen-lockfile
+            bun run build
+            bun run build:pglite-snapshot
+            id ci-test
+            chown -R 1001:1001 /app
+          '
+      - name: Compare only eight failed files, ten counted trials; never a full-suite green
+        env:
+          CI: 'true'
+        run: |
           set -euo pipefail
-          echo "[runner] bun version: $(bun --version)"
-          # Test prerequisites may be missing even in a warm runner image: git backs
-          # fixture repos, python3 backs security scans and argv recorders, and ps backs
-          # live-process / PID-reuse lock checks. psql cleans up connections between E2E
-          # files. None are application dependencies.
-          if ! command -v git >/dev/null 2>&1 || \
-             ! command -v python3 >/dev/null 2>&1 || \
-             ! command -v ps >/dev/null 2>&1 || \
-             ! command -v psql >/dev/null 2>&1 || \
-             ! command -v cc >/dev/null 2>&1 || \
-             ! command -v jq >/dev/null 2>&1; then
-            echo "[runner] Installing test prerequisites (debian apt)..."
-            apt-get update -qq >/dev/null
-            apt-get install -y -qq git ca-certificates python3 procps postgresql-client jq build-essential >/dev/null
-          fi
-          # Container runs as root (uid 0) against a host-uid bind-mount; mark repo +
-          # any worktree gitdir as safe so `git status` etc. don't refuse.
-          git config --global --add safe.directory '*' || true
-          # #6756: the admin/dist volume starts empty on a fresh checkout; make it the worktree's bytes.
-          bash scripts/ci-hydrate-admin-dist.sh /ci-src/admin-dist admin/dist
-          # Revalidate even a warm dependency volume against this checkout's lockfile.
-          echo "[runner] bun install --frozen-lockfile"
-          bun install --frozen-lockfile
-          echo "[runner] compiling isolated Linux CLI for executable security checks"
-          bun run build
+          cat > "$RUNNER_TEMP/failure-native.sh" <<'NATIVE_FAILURES'
           set -euo pipefail
-          shard="$CI_REMAINING_SHARD"
-          test "$shard" -ge 1 && test "$shard" -le 4
+          export HOME=/tmp/ci-failure-outer-home
+          mkdir -p "$HOME"
+          git config --global --add safe.directory '*'
+          id
+          git update-index --refresh
+          git status --short
+          # Forced probe: same chmod000 object, root can still read; unprivileged UID1001 cannot.
+          python3 - <<'PROBE'
+          import os,tempfile,pathlib,json,subprocess
+          folder=pathlib.Path(tempfile.mkdtemp(prefix='permission-probe-'))
+          file=folder/'mode000';file.write_text('synthetic');file.chmod(0)
+          outcomes=[]
+          for trial in range(10):
+              try:file.read_text();outcomes.append('readable')
+              except PermissionError:outcomes.append('permission_denied')
+          file.chmod(0o600);file.unlink();folder.rmdir()
+          print(json.dumps({'diagnostic':'permission_probe','uid':os.getuid(),'trials':outcomes}))
+          isolated=pathlib.Path(tempfile.mkdtemp(prefix='git-home-probe-'))
+          env=dict(os.environ,HOME=str(isolated))
+          result=subprocess.run(['git','status','--porcelain'],env=env,text=True,capture_output=True)
+          print(json.dumps({'diagnostic':'isolated_home_git','uid':os.getuid(),'exit_code':result.returncode,'stderr':result.stderr}))
+          isolated.rmdir()
+          PROBE
           export GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar
           export GBRAIN_TEST_TIMEOUT_MULTIPLIER=6
-          export GBRAIN_TEST_RECEIPT_DIR=/app/.context/remaining-receipts
-          bun run build:pglite-snapshot
-          bun scripts/lib/ensure-e2e-database.ts postgresql://postgres:postgres@postgres-1:5432/gbrain_test gbrain_ci_admin_test
-          printf '[remaining] native unit shard %s/4\n' "$shard"
-          env -u DATABASE_URL -u GBRAIN_DATABASE_URL SHARD="${shard}/4" bash scripts/run-unit-shard.sh
-          printf '[remaining] native e2e shard %s/4\n' "$shard"
-          SHARD="${shard}/4" \
-          DATABASE_URL="postgresql://postgres:postgres@postgres-${shard}:5432/gbrain_test" \
-          GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer_test \
-          GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_ci_admin_test \
-          GBRAIN_PGBOUNCER_E2E_DB="gbrain_pooled_${shard}_test" \
-          GBRAIN_CI_REQUIRE_PGBOUNCER=1 GBRAIN_TEST_DB=1 \
-          bash scripts/run-e2e.sh
-          printf '[remaining] partition %s/4 complete\n' "$shard"
-
-          NATIVE_REMAINING
+          for trial in $(seq 1 10); do
+            export GBRAIN_TEST_RECEIPT_DIR="/ci-results/trial-${trial}"
+            set +e
+            env -u DATABASE_URL -u GBRAIN_DATABASE_URL bash scripts/run-unit-shard.sh \
+              test/persistence-worktree-refresh.test.ts \
+              test/doctor-content-golden.test.ts \
+              test/cycle/concept-publication-file-recheck.test.ts \
+              test/doctor-hot-checks-golden.test.ts \
+              test/doctor-json-golden.test.ts \
+              test/sync-unreadable-file-gbra130.test.ts \
+              test/scripts/e2e-runner.test.ts \
+              test/doctor-not-verified-5432.test.ts \
+              2>&1 | tee "/ci-results/trial-${trial}.log"
+            codes=("${PIPESTATUS[@]}")
+            set -e
+            python3 - "$trial" "${codes[0]}" "${codes[1]}" <<'RECEIPT'
+          import sys,json,pathlib,os
+          row={'trial':int(sys.argv[1]),'uid':os.getuid(),'native_exit':int(sys.argv[2]),'tee_exit':int(sys.argv[3]),'diagnostic_only':True,'full_suite_gate':False}
+          with pathlib.Path('/ci-results/trials.jsonl').open('a') as file:file.write(json.dumps(row)+'\n')
+          print(json.dumps(row))
+          RECEIPT
+            test "${codes[1]}" -eq 0
+            # Ordinary failures are measured, never retried to get a green gate.
+            # Infrastructure/usage failures stop this diagnostic and preserve partials.
+            test "${codes[0]}" -le 1
+          done
+          NATIVE_FAILURES
           docker compose -f docker-compose.ci.yml run --rm \
-            -e CI_REMAINING_SHARD="${{ matrix.shard }}" \
-            -e GITHUB_SHA=ce0e2b76e6cadc83645c6547e64d867bd2013cc2 \
+            --user "${{ matrix.uid }}:${{ matrix.uid }}" \
+            -e CI='true' -e GITHUB_SHA="${{ matrix.product_sha }}" \
             -e GITHUB_RUN_ID="$GITHUB_RUN_ID" \
-            -v "$RUNNER_TEMP/remaining-native.sh:/remaining-native.sh:ro" \
-            runner bash /remaining-native.sh 2>&1 | tee .context/remaining-native.log
-      - name: Retain partition output and native execution receipts
+            -v "$RUNNER_TEMP/failure-native.sh:/failure-native.sh:ro" \
+            -v "$RUNNER_TEMP/failure-results:/ci-results" \
+            runner bash /failure-native.sh 2>&1 | tee "$RUNNER_TEMP/failure-results/native-comparison.log"
+      - name: Retain explicit synthetic diagnostic results and native receipts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: remaining-native-${{ matrix.shard }}-${{ github.run_id }}
-          path: .context/
+          name: failed-files-${{ matrix.revision }}-uid${{ matrix.uid }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/failure-results/
           retention-days: 7
-          if-no-files-found: warn
+          if-no-files-found: error
+      - name: Stop only this disposable test stack
+        if: always()
+        run: docker compose -f docker-compose.ci.yml down --remove-orphans
