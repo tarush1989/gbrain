@@ -89,7 +89,7 @@ jobs:
           test "$(id -u)" = 1001
           test "$(git rev-parse HEAD)" = ca1281a2ed3236ac45adddb2d08e84423769c321
           export GBRAIN_SKIP_STARTUP_HOOKS=1
-          bun --no-env-file --config=/dev/null src/index.ts --version
+          ./bin/gbrain --version
           export GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar
           export GBRAIN_TEST_TIMEOUT_MULTIPLIER=6
           export GBRAIN_TEST_RECEIPT_DIR=/ci-results/native-receipts
