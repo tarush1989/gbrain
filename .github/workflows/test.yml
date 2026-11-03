@@ -1,4 +1,4 @@
-name: Inline no-match fixture qualification
+name: Inline current-source discrimination
 on:
   workflow_dispatch:
 permissions:
@@ -93,33 +93,36 @@ jobs:
           case "$CI_NATIVE_LANE" in
             guards)
               bash scripts/check-bun-test-timeout.sh
-              # One changed source-boundary test; no full-corpus claim here.
-              env -u DATABASE_URL -u GBRAIN_DATABASE_URL bun test test/autopilot-inline-source-freshness.serial.test.ts --reporter=junit --reporter-outfile=/ci-results/no-match.green.xml 2>&1 | tee /ci-results/no-match.green.log
-              cp src/commands/autopilot-daemon.ts /ci-results/daemon-before-mutation.ts
-              python3 - <<'PY_MUTATE'
+              # Required current-test counterfactual; source31 remains frozen.
+              # Earlier RED proved the original test, before the no-match arm.
+              cp src/commands/autopilot-daemon.ts /ci-results/daemon-before-discrimination.ts
+              DISCRIMINATE_BASE=46a6fd758b30314da475339df1f473056b80e956 \
+                bash scripts/check-test-discriminates.sh \
+                test/autopilot-inline-source-freshness.serial.test.ts \
+                src/commands/autopilot-daemon.ts 2>&1 | tee /ci-results/discrimination.helper.log
+              cmp /ci-results/daemon-before-discrimination.ts src/commands/autopilot-daemon.ts
+              git diff --exit-code -- src/commands/autopilot-daemon.ts
+              python3 - <<'PY_PROOF'
           from pathlib import Path
-          p = Path('src/commands/autopilot-daemon.ts')
-          old = b'          sourceId,\n'
-          new = b"          sourceId: sourceId ?? 'default',\n"
-          text = p.read_bytes()
-          assert text.count(old) == 1
-          p.write_bytes(text.replace(old, new, 1))
-          PY_MUTATE
-              set +e
-              env -u DATABASE_URL -u GBRAIN_DATABASE_URL bun test test/autopilot-inline-source-freshness.serial.test.ts > /ci-results/no-match.mutation.log 2>&1
-              mutation_rc=$?
-              set -e
-              cat /ci-results/no-match.mutation.log
-              cp /ci-results/daemon-before-mutation.ts src/commands/autopilot-daemon.ts
-              cmp /ci-results/daemon-before-mutation.ts src/commands/autopilot-daemon.ts
-              test "$mutation_rc" -ne 0
-              grep -F 'expect(await sourceStamps()).toEqual(completed)' /ci-results/no-match.mutation.log
-              printf '{"candidate":"31c5a41ba9103590f2c2922434b8f15c9b55f380","green_exit":0,"mutation_exit":%s,"mutation_expected_assertion":true,"source_restored_exact":true}\n' "$mutation_rc" > /ci-results/no-match-proof.json
-              # Cold native analysis runs in its own step before verify's
-              # existing120s per-check bound. Native incremental invalidation
-              # remains intact; no wrapper limit or assertion is increased.
-              bun run typecheck
-              bun run verify
+          import json, re, shutil
+          log = Path('/ci-results/discrimination.helper.log').read_text()
+          m = re.search(r'pre-fix run: exit=(\d+) pass=(\d+) fail=(\d+) \(full output: ([^)]+)\)', log)
+          assert m and int(m[1]) != 0 and int(m[3]) > 0
+          raw = Path(m[4])
+          assert raw.is_file() and raw.name.startswith('discriminate-out.')
+          shutil.copyfile(raw, '/ci-results/discrimination.prefx.log')
+          assert 'lastSource' in raw.read_text(), 'must fail the real source-stamp assertion'
+          Path('/ci-results/discrimination-proof.json').write_text(json.dumps({
+              'candidate': '31c5a41ba9103590f2c2922434b8f15c9b55f380',
+              'base': '46a6fd758b30314da475339df1f473056b80e956',
+              'helper_exit': 0, 'pre_fix_exit': int(m[1]), 'pre_fix_pass': int(m[2]),
+              'pre_fix_fail': int(m[3]), 'source_restored_exact': True
+          }))
+          PY_PROOF
+              # The native helper's paste line does not execute restored-green.
+              # Execute that assertion explicitly, not another full-corpus run.
+              env -u DATABASE_URL -u GBRAIN_DATABASE_URL bun test test/autopilot-inline-source-freshness.serial.test.ts --reporter=junit --reporter-outfile=/ci-results/discrimination.green.xml 2>&1 | tee /ci-results/discrimination.green.log
+              # Current-source typecheck and91guards already passed41678160599.
               ;;
             serial)
               env -u DATABASE_URL -u GBRAIN_DATABASE_URL bun run test:serial
@@ -174,8 +177,9 @@ jobs:
           paths=()
           test ! -d receipts || paths+=(receipts)
           test ! -f result.json || paths+=(result.json)
-          test ! -f no-match.green.xml || paths+=(no-match.green.xml)
-          test ! -f no-match-proof.json || paths+=(no-match-proof.json)
+          for name in discrimination.green.xml discrimination-proof.json discrimination.helper.log discrimination.prefx.log; do
+            test ! -f "$name" || paths+=("$name")
+          done
           if [ "${#paths[@]}" -gt 0 ]; then
             tar -czf "$RUNNER_TEMP/native-receipts.tar.gz" "${paths[@]}"
             sha256sum "$RUNNER_TEMP/native-receipts.tar.gz"
