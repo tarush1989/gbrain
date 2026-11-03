@@ -1,4 +1,4 @@
-name: Inline no-match fixture qualification
+name: Inline no-match full native gate
 on:
   workflow_dispatch:
 permissions:
@@ -11,8 +11,18 @@ jobs:
       matrix:
         include:
           - { lane: guards, shard: 0 }
+          - { lane: serial, shard: 0 }
+          - { lane: slow, shard: 0 }
+          - { lane: unit, shard: 1 }
+          - { lane: unit, shard: 2 }
+          - { lane: unit, shard: 3 }
+          - { lane: unit, shard: 4 }
+          - { lane: e2e, shard: 1 }
+          - { lane: e2e, shard: 2 }
+          - { lane: e2e, shard: 3 }
+          - { lane: e2e, shard: 4 }
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 180
     env:
       GBRAIN_CI_BUN_TAG: contribution-1.4.4-curl
     steps:
@@ -93,31 +103,7 @@ jobs:
           case "$CI_NATIVE_LANE" in
             guards)
               bash scripts/check-bun-test-timeout.sh
-              # One changed source-boundary test; no full-corpus claim here.
-              env -u DATABASE_URL -u GBRAIN_DATABASE_URL bun test test/autopilot-inline-source-freshness.serial.test.ts --reporter=junit --reporter-outfile=/ci-results/no-match.green.xml 2>&1 | tee /ci-results/no-match.green.log
-              cp src/commands/autopilot-daemon.ts /ci-results/daemon-before-mutation.ts
-              python3 - <<'PY_MUTATE'
-          from pathlib import Path
-          p = Path('src/commands/autopilot-daemon.ts')
-          old = b'          sourceId,\n'
-          new = b"          sourceId: sourceId ?? 'default',\n"
-          text = p.read_bytes()
-          assert text.count(old) == 1
-          p.write_bytes(text.replace(old, new, 1))
-          PY_MUTATE
-              set +e
-              env -u DATABASE_URL -u GBRAIN_DATABASE_URL bun test test/autopilot-inline-source-freshness.serial.test.ts > /ci-results/no-match.mutation.log 2>&1
-              mutation_rc=$?
-              set -e
-              cat /ci-results/no-match.mutation.log
-              cp /ci-results/daemon-before-mutation.ts src/commands/autopilot-daemon.ts
-              cmp /ci-results/daemon-before-mutation.ts src/commands/autopilot-daemon.ts
-              test "$mutation_rc" -ne 0
-              grep -F 'expect(await sourceStamps()).toEqual(completed)' /ci-results/no-match.mutation.log
-              printf '{"candidate":"31c5a41ba9103590f2c2922434b8f15c9b55f380","green_exit":0,"mutation_exit":%s,"mutation_expected_assertion":true,"source_restored_exact":true}\n' "$mutation_rc" > /ci-results/no-match-proof.json
-              # Cold native analysis runs in its own step before verify's
-              # existing120s per-check bound. Native incremental invalidation
-              # remains intact; no wrapper limit or assertion is increased.
+              # Native cold analysis before verify's unchanged120s bound.
               bun run typecheck
               bun run verify
               ;;
@@ -174,8 +160,6 @@ jobs:
           paths=()
           test ! -d receipts || paths+=(receipts)
           test ! -f result.json || paths+=(result.json)
-          test ! -f no-match.green.xml || paths+=(no-match.green.xml)
-          test ! -f no-match-proof.json || paths+=(no-match-proof.json)
           if [ "${#paths[@]}" -gt 0 ]; then
             tar -czf "$RUNNER_TEMP/native-receipts.tar.gz" "${paths[@]}"
             sha256sum "$RUNNER_TEMP/native-receipts.tar.gz"
