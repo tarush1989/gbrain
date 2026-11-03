@@ -29,6 +29,7 @@ import {
   shouldEmitDbAccessMarker,
 } from '../core/pg-access-classify.ts';
 import { resolveBrainId as resolveBrainIdForDbMarker } from '../core/brain-resolver.ts';
+import { captureHookSessionCwd } from '../core/session-cwd.ts';
 import type { GBrainConfig } from '../core/config.ts';
 import type { AIGatewayConfig } from '../core/ai/types.ts';
 import type { BrainEngine } from '../core/engine.ts';
@@ -317,6 +318,8 @@ async function main() {
 
   let command = args[0];
   installCliRoutingFor(() => command, args);
+  // #8426: a serve the hook launcher started reads the session directory from GBRAIN_HOOK_CWD, before any brain or source resolution.
+  if (command === 'serve') captureHookSessionCwd();
 
   if (!command || command === '--help' || command === '-h') {
     printHelp();
@@ -1693,9 +1696,7 @@ export function formatResult(
         // (autocut decision, `degraded: reranker_skipped (no_key)`) render.
         return formatResultsExplain(results, meta ?? undefined);
       }
-      return retrievalIncompleteLine(meta) + results.map(r =>
-        `[${r.score?.toFixed(4) || '?'}] ${r.slug} -- ${require('../core/search/transcript-quote.ts').rowPreview(r, 100)}${r.stale ? ' (stale)' : ''}`,
-      ).join('\n') + '\n';
+      return retrievalIncompleteLine(meta) + results.map(require('./search-row-format.ts').formatSearchRow).join('\n') + '\n';
     }
     case 'get_tags': {
       const tags = result as string[];

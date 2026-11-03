@@ -3962,7 +3962,8 @@ brain had recorded it at an instant, from the belief ledger
 `as_of` on `get_links`, which is valid time (a date). A read answers with the
 interval the instant falls in, `certified` (false with `uncertified_reason` on
 an unmanaged source, a drifted interval or a truncated walk), and a `body` of
-`live`, `version`, `segmented` (read it through `body_ref`) or `unavailable`
+`live`, `version`, `segmented` (`body_ref` gives its size; no read serves an
+older segmented body yet) or `unavailable`
 with a `body_reason` (`purged`, `expired`, `hard_deleted`, `pruned`,
 `version_missing`). A body no retained version holds is disclosed, never
 borrowed from the version next to it. The refusals below change nothing; run
@@ -4287,7 +4288,9 @@ The message names the guide for the harness you asked for (OpenClaw:
   install with a different `GBRAIN_HOME`. Run setup with `--name <other>` so
   each install owns its own entries.
 - `harness_lane`: `gbrain bootstrap harness` (or a workspace bootstrap
-  install) already wires gbrain hooks or MCP in this configuration. Keep that
+  install) already wires gbrain hooks or MCP in this configuration (a harness
+  target in another HOME's or `CODEX_HOME`'s config directory does not count;
+  project-scoped hooks do). Keep that
   wiring, or remove it with `gbrain bootstrap harness --remove` first. On
   Codex this also fires when the bootstrap Codex lane's `SessionEnd` hook is in
   `hooks.json` and you passed `--capture`: keep that lane and run setup without
@@ -4346,7 +4349,9 @@ rule reaches them through their instruction file only.
 <a id="hook-session-cwd"></a>
 
 `hook_session_cwd`: a hook that `gbrain setup <claude-code|codex>` or the
-turn-rule lane wrote starts gbrain in the session's working directory. With a
+turn-rule lane wrote, a stdio MCP entry for `gbrain serve` (#8426), or a hook
+from `gbrain bootstrap hooks`, `gbrain bootstrap harness` or its Codex
+`SessionEnd` capture (#8428) starts gbrain in the session's working directory. With a
 script-mode install (`bun install -g`, `bun link`) Bun reads that directory's
 `bunfig.toml` (a top-level `preload` runs before any gbrain code) and its
 `.env` files first, so opening a session in a cloned repository would run that
@@ -4373,6 +4378,17 @@ setup wrote it (`edited: true`) is never rewritten, so the fix is a
 already carried another warning with its own fix, that code and fix stay, and
 the launcher fix is in `details.hook_launcher_fix`; run it after the first fix. Check with
 `gbrain doctor --only harness_wiring`.
+
+An MCP entry or a bootstrap hook carries its own command. A user-scope MCP
+entry setup still owns gets `fix.argv` `gbrain setup <harness>`, and
+post-upgrade moves a Claude Code one itself; a Codex one only gets the setup
+command printed, like setup's Codex hooks. An entry you edited after setup
+wrote it is kept, so the fix is a `user_message` to remove or rewrite it
+first. A `gbrain bootstrap` entry names `gbrain bootstrap hooks --harness
+<harness> --repair` from the workspace directory, and a `gbrain bootstrap
+harness` hook names `gbrain bootstrap harness --harness claude-code`; both
+are the user's to run, since those writers change the workspace or re-trust
+Codex hooks.
 
 ## Connection notices
 

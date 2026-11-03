@@ -23,7 +23,7 @@
  * Engine-free: setup never opens the database itself.
  */
 import { realpathSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { removeHermesTurnHook, syncHermesTurnHook } from '../core/setup/hermes-turn-hook.ts';
 import { removeOpenclawTurnPlugin, syncOpenclawTurnPlugin } from '../core/setup/openclaw-turn-plugin.ts';
 import { hasTurnRuleHook, isTurnRuleHarness, removeTurnRuleHook, syncTurnRuleHook, type TurnHookOutcome, type TurnRuleHarness } from '../core/setup/turn-hook.ts';
@@ -37,6 +37,7 @@ import { writeJsonDocument } from '../core/cli-force-exit.ts';
 import { configDir, gbrainPath, loadConfig, type GBrainConfig } from '../core/config.ts';
 import { resolveGbrainBin } from '../core/gbrain-bin.ts';
 import { isRegistrationSurface, isValidName, REGISTRATION_SURFACE, registrationAdvertise, stdioServeArgv } from '../core/mcp-registration.ts';
+import { hookLauncherPath } from '../core/setup/hook-launcher.ts';
 import { isValidSourceId } from '../core/source-id.ts';
 import { peekLock } from '../core/pglite-lock.ts';
 import { claudePluginProvidesName, codexPluginProvidesName } from '../core/bootstrap/plugin-lanes.ts';
@@ -312,7 +313,7 @@ function describeTarget(t: Target, out: Out, harness: SetupHarnessId = 'claude-c
   say(out, `Target (${HARNESS_LABEL[harness]}, ${t.scope} scope):`);
   say(out, `  brain      ${brain}`);
   say(out, `  source     ${t.source.id ? `'${t.source.id}' (pinned, from ${t.source.from === 'flag' ? '--source' : 'GBRAIN_SOURCE'})` : 'the brain\'s default source (unpinned)'}`);
-  say(out, `  transport  stdio MCP: ${stdioServeArgv(t.launcher, t.surface, t.advertise ?? null).join(' ')}${t.advertise ? ` (lists the ${t.advertise === 'verbs' ? 'memory verbs and request_tools' : `${t.advertise} tools`}; every ${t.surface} tool stays callable)` : ''}`);
+  say(out, `  transport  stdio MCP: ${[hookLauncherPath(t.brain.config_dir), ...stdioServeArgv(t.launcher, t.surface, t.advertise ?? null)].join(' ')}${t.advertise ? ` (lists the ${t.advertise === 'verbs' ? 'memory verbs and request_tools' : `${t.advertise} tools`}; every ${t.surface} tool stays callable)` : ''}`);
   say(out, `  owner      ${t.registration_owner === 'setup' ? `this setup (${t.receipt_path})` : t.registration_owner === 'plugin' ? `the gbrain ${HARNESS_LABEL[harness]} plugin (MCP); setup adds hooks only` : `none yet; setup will own '${t.name}'`}`);
   if (t.live_owner) say(out, `  live       gbrain ${t.live_owner.transport === 'http' ? 'serve --http' : 'stdio serve'} PID ${t.live_owner.pid}${t.live_owner.ours ? ' (started by this registration)' : ''}`);
   say(out, `  files      ${t.config_path} (MCP${t.hooks_path ? ' + hook trust' : ''}), ${t.hooks_path ?? t.settings_path} (hooks)`);
@@ -416,7 +417,7 @@ export async function runSetup(args: string[]): Promise<number> {
     if (found.mcp.state === 'remote') return refuse(hostedConnection(found.mcp.url ?? 'a hosted brain', true, flags.name), out);
 
     const pluginOwner = flags.name === 'gbrain' ? claudePluginProvidesName(claudeUserSettingsPath(), 'gbrain') : null;
-    const { dataDir, liveOwner } = liveOwnerOf(cfg, prior?.status === 'installed' && found.mcp.state === 'current');
+    const { dataDir, liveOwner } = liveOwnerOf(cfg, prior?.status === 'installed' && (found.mcp.state === 'current' || found.mcp.state === 'owned'));
     const target: Target = {
       brain: !cfg ? { kind: 'new-local-pglite', path: gbrainPath('brain.pglite'), config_dir: brainHome }
         : cfg.engine === 'pglite' ? { kind: 'local-pglite', path: dataDir, config_dir: brainHome } : { kind: 'local-postgres', config_dir: brainHome },
@@ -436,8 +437,7 @@ export async function runSetup(args: string[]): Promise<number> {
         actor: 'agent', argv: ['gbrain', 'setup', 'claude-code', '--instructions-only', ...(flags.name === 'gbrain' ? [] : ['--name', flags.name]), ...(scope === 'project' ? ['--scope', 'project'] : [])],
         why: 'Keeps that entry and adds only the brain-first block and the per-turn hook, so its sessions are told to check gbrain first on every turn. Or preview a setup under another name (--name), or remove that entry yourself and run setup again.', verify: verifyDryRun('claude-code', flags.name) }), out);
     }
-    const harnessReceipt = readHarnessReceiptState(brainHome);
-    const harnessLane = harnessReceipt.state === 'ok' && harnessReceipt.receipt.targets.some((t) => t.host === 'claude-code');
+    const harnessLane = harnessLaneWires(brainHome, 'claude-code', [dirname(claudeUserSettingsPath()), dirname(found.settingsPath)]);
     const laneEvents = found.otherLaneEvents.filter((e) => (plan.events as string[]).includes(e));
     if (harnessLane || laneEvents.length > 0) {
       return refuse(ownerConflict('harness_lane', `${harnessLane ? '`gbrain bootstrap harness` already wires Claude Code for this install' : `${found.settingsPath} already wires ${laneEvents.join(', ')} through another gbrain install lane`}; two lanes would fire every hook twice.`, {
@@ -487,6 +487,27 @@ export async function runSetup(args: string[]): Promise<number> {
     process.stderr.write(`gbrain setup: ${(e as Error).message}\n`);
     return 1;
   }
+}
+
+/**
+ * #7771: whether `gbrain bootstrap harness` wired the configuration setup is
+ * about to wire. One install can serve several HOMEs (or CODEX_HOMEs), so the
+ * lane conflicts only through a target in one of `configDirs`, project-scoped
+ * hooks (every configuration loads a project's), or a receipt that records
+ * no paths for the host.
+ */
+function harnessLaneWires(brainHome: string, host: 'claude-code' | 'codex', configDirs: string[]): boolean {
+  const state = readHarnessReceiptState(brainHome);
+  if (state.state !== 'ok') return false;
+  const targets = state.receipt.targets.filter((t) => t.host === host);
+  if (targets.length === 0) return false;
+  if (!targets.some((t) => typeof t.path === 'string')) return true;
+  const real = (p: string): string => {
+    const abs = resolve(p);
+    try { return realpathSync(abs); } catch { return dirname(abs) === abs ? abs : join(real(dirname(abs)), basename(abs)); }
+  };
+  const dirs = new Set(configDirs.map(real));
+  return targets.some((t) => (t.kind === 'hooks' && t.scope !== 'user') || (typeof t.path === 'string' && dirs.has(real(dirname(resolve(t.path))))));
 }
 
 function liveOwnerOf(cfg: GBrainConfig | null, ours: boolean): { dataDir?: string; liveOwner: Target['live_owner'] } {
@@ -566,7 +587,7 @@ async function runCodexSetup(flags: SetupFlags, launcher: string, cfg: GBrainCon
     if (found.mcp.state === 'remote') return refuse(hostedConnection(found.mcp.url ?? 'a hosted brain', true, flags.name, 'codex'), out);
 
     const pluginOwner = codexPluginProvidesName(paths.configPath, flags.name);
-    const { dataDir, liveOwner } = liveOwnerOf(cfg, prior?.status === 'installed' && found.mcp.state === 'current');
+    const { dataDir, liveOwner } = liveOwnerOf(cfg, prior?.status === 'installed' && (found.mcp.state === 'current' || found.mcp.state === 'owned'));
     const target: Target = {
       brain: !cfg ? { kind: 'new-local-pglite', path: gbrainPath('brain.pglite'), config_dir: brainHome }
         : cfg.engine === 'pglite' ? { kind: 'local-pglite', path: dataDir, config_dir: brainHome } : { kind: 'local-postgres', config_dir: brainHome },
@@ -586,8 +607,7 @@ async function runCodexSetup(flags: SetupFlags, launcher: string, cfg: GBrainCon
         actor: 'agent', argv: ['gbrain', 'setup', 'codex', '--instructions-only', ...(flags.name === 'gbrain' ? [] : ['--name', flags.name])],
         why: 'Keeps that table and adds only the brain-first block and the per-turn hook, so its sessions are told to check gbrain first on every turn. Or preview a setup under another name (--name), or remove that table yourself and run setup again.', verify: verifyDryRun('codex', flags.name) }), out);
     }
-    const harnessReceipt = readHarnessReceiptState(brainHome);
-    const harnessLane = harnessReceipt.state === 'ok' && harnessReceipt.receipt.targets.some((t) => t.host === 'codex');
+    const harnessLane = harnessLaneWires(brainHome, 'codex', [dirname(found.configPath), dirname(found.hooksPath)]);
     const laneEvents = found.otherLaneEvents.filter((e) => (plan.events as string[]).includes(e));
     if (harnessLane || laneEvents.length > 0) {
       return refuse(ownerConflict('harness_lane', `${harnessLane ? '`gbrain bootstrap harness` already wires Codex for this install' : `${found.hooksPath} already wires ${laneEvents.join(', ')} through gbrain's bootstrap Codex lane`}; two lanes would fire every hook twice.`, {
