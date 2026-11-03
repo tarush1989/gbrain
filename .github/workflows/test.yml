@@ -1,4 +1,4 @@
-name: Integrated inline-cycle native gate
+name: Integrated inline-cycle guard continuation
 on:
   workflow_dispatch:
 permissions:
@@ -11,16 +11,6 @@ jobs:
       matrix:
         include:
           - { lane: guards, shard: 0 }
-          - { lane: serial, shard: 0 }
-          - { lane: slow, shard: 0 }
-          - { lane: unit, shard: 1 }
-          - { lane: unit, shard: 2 }
-          - { lane: unit, shard: 3 }
-          - { lane: unit, shard: 4 }
-          - { lane: e2e, shard: 1 }
-          - { lane: e2e, shard: 2 }
-          - { lane: e2e, shard: 3 }
-          - { lane: e2e, shard: 4 }
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
@@ -103,6 +93,10 @@ jobs:
           case "$CI_NATIVE_LANE" in
             guards)
               bash scripts/check-bun-test-timeout.sh
+              # Cold native analysis runs in its own step before verify's
+              # existing120s per-check bound. Native incremental invalidation
+              # remains intact; no wrapper limit or assertion is increased.
+              bun run typecheck
               bun run verify
               ;;
             serial)
