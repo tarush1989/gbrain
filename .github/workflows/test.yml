@@ -1,44 +1,53 @@
-name: Graduation pooler topology controlled comparison
+name: Integrated inline-cycle native gate
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  graduation-pooler-topology:
+  native-lane:
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 4
       matrix:
-        source:
-          - name: upstream
-            sha: a131fb20ef4aafd017f0c6a6565ce5627dc46897
-          - name: candidate
-            sha: ce0e2b76e6cadc83645c6547e64d867bd2013cc2
-        topology: [mismatched, colocated]
+        include:
+          - { lane: guards, shard: 0 }
+          - { lane: serial, shard: 0 }
+          - { lane: slow, shard: 0 }
+          - { lane: unit, shard: 1 }
+          - { lane: unit, shard: 2 }
+          - { lane: unit, shard: 3 }
+          - { lane: unit, shard: 4 }
+          - { lane: e2e, shard: 1 }
+          - { lane: e2e, shard: 2 }
+          - { lane: e2e, shard: 3 }
+          - { lane: e2e, shard: 4 }
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 180
     env:
       GBRAIN_CI_BUN_TAG: contribution-1.4.4-curl
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: tarush1989/gbrain
-          ref: ${{ matrix.source.sha }}
+          ref: 148cb17f37e7a622ad29f4a5152c6896f58a2be8
           fetch-depth: 0
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: 1.4.4
-      - name: Verify exact product source and comparison base
+      - name: Bind exact integrated product and upstream comparison
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${{ matrix.source.sha }}"
+          test "$(git rev-parse HEAD)" = 148cb17f37e7a622ad29f4a5152c6896f58a2be8
           git remote set-url origin https://github.com/garrytan/gbrain.git
-          git status --short
+          git fetch origin 46a6fd758b30314da475339df1f473056b80e956:refs/remotes/origin/master
+          test "$(git rev-parse origin/master)" = 46a6fd758b30314da475339df1f473056b80e956
+          test -z "$(git status --porcelain)"
+          git diff origin/master --stat
           test "$(id -u)" = 1001
           nproc
           free -m
-      - name: Install existing pinned gitleaks CLI
+      - name: Install pinned native secret scanner
         run: |
           set -euo pipefail
           VER=8.30.1
@@ -50,11 +59,17 @@ jobs:
           ( cd "$RUNNER_TEMP/gitleaks-dl" && grep " ${BASE}\$" "$RUNNER_TEMP/gitleaks_checksums.txt" | sha256sum -c - )
           tar -xzf "$RUNNER_TEMP/gitleaks-dl/${BASE}" -C "$RUNNER_TEMP" gitleaks
           sudo install -m 755 "$RUNNER_TEMP/gitleaks" /usr/local/bin/gitleaks
-          gitleaks version
-      - name: Prepare the test container's required tools
+          if [ "${{ matrix.lane }}" = guards ]; then
+            bash scripts/test-gitleaks-config.sh
+            bash scripts/scan-worktree-secrets.sh
+            gitleaks git . --redact --no-banner --log-opts="origin/master..HEAD"
+            bash scripts/ci-local-e2e-smoke.sh
+          fi
+      - name: Prepare disposable native CI tools and databases
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/empty-build-context"
+          mkdir -p "$RUNNER_TEMP/empty-build-context" "$RUNNER_TEMP/native-results"
+          chmod 0777 "$RUNNER_TEMP/native-results"
           docker build -t oven/bun:contribution-1.4.4-curl -f - "$RUNNER_TEMP/empty-build-context" <<'DOCKERFILE'
           FROM oven/bun:1.4.4
           USER root
@@ -62,13 +77,6 @@ jobs:
           RUN groupadd --gid 1001 ci-test && useradd --uid 1001 --gid 1001 --create-home ci-test
           DOCKERFILE
           docker compose -f docker-compose.ci.yml pull postgres-1 postgres-2 postgres-3 postgres-4 pgbouncer
-      - name: Prepare identical native tools and snapshot before selecting the test UID
-        env:
-          CI: 'true'
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/facts-results"
-          chmod 0777 "$RUNNER_TEMP/facts-results"
           docker compose -f docker-compose.ci.yml up -d postgres-1 postgres-2 postgres-3 postgres-4 pgbouncer
           docker compose -f docker-compose.ci.yml run --rm runner bash -ec '
             git config --global --add safe.directory "*"
@@ -77,68 +85,89 @@ jobs:
             bun run build
             bun run build:pglite-snapshot
             bun scripts/lib/ensure-e2e-database.ts postgresql://postgres:postgres@postgres-1:5432/gbrain_test gbrain_ci_admin_test
-            id ci-test
             chown -R 1001:1001 /app
           '
-      - name: Count ten native trials and a forced topology probe
-        env:
-          CI: 'true'
+      - name: Execute the unchanged native lane as UID1001
         run: |
           set -euo pipefail
-          cat > "$RUNNER_TEMP/topology-native.sh" <<'NATIVE_TOPOLOGY'
+          cat > "$RUNNER_TEMP/native-lane.sh" <<'NATIVE_LANE'
           set -euo pipefail
-          export HOME=/tmp/native-topology-outer-home
-          mkdir -p "$HOME"
+          export HOME=/home/ci-test
           test "$(id -u)" = 1001
-          test "$(git rev-parse HEAD)" = "$CI_PRODUCT_SHA"
+          test "$(git rev-parse HEAD)" = 148cb17f37e7a622ad29f4a5152c6896f58a2be8
+          git status --short
           export GBRAIN_SKIP_STARTUP_HOOKS=1
-          ./bin/gbrain --version
           export GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar
-          export GBRAIN_TEST_TIMEOUT_MULTIPLIER=6
-          case "$CI_TOPOLOGY" in
-            mismatched) direct_host=postgres-4 ;;
-            colocated) direct_host=postgres-1 ;;
+          export GBRAIN_TEST_RECEIPT_DIR=/ci-results/receipts
+          ./bin/gbrain --version
+          case "$CI_NATIVE_LANE" in
+            guards)
+              bash scripts/check-bun-test-timeout.sh
+              bun run verify
+              ;;
+            serial)
+              env -u DATABASE_URL -u GBRAIN_DATABASE_URL bun run test:serial
+              ;;
+            slow)
+              env -u DATABASE_URL -u GBRAIN_DATABASE_URL bun run test:slow
+              ;;
+            unit)
+              export GBRAIN_TEST_TIMEOUT_MULTIPLIER=6
+              env -u DATABASE_URL -u GBRAIN_DATABASE_URL SHARD="${CI_NATIVE_SHARD}/4" bash scripts/run-unit-shard.sh
+              ;;
+            e2e)
+              export GBRAIN_TEST_TIMEOUT_MULTIPLIER=6
+              # Every cell owns its own stack: direct and pooled connections
+              # target postgres-1, as established by both topology controls.
+              # Native selection, wrappers, assertions and limits are intact.
+              SHARD="${CI_NATIVE_SHARD}/4" \
+              DATABASE_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \
+              GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer_test \
+              GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_ci_admin_test \
+              GBRAIN_PGBOUNCER_E2E_DB="gbrain_pooled_${CI_NATIVE_SHARD}_test" \
+              GBRAIN_CI_REQUIRE_PGBOUNCER=1 GBRAIN_TEST_DB=1 \
+              bash scripts/run-e2e.sh
+              ;;
             *) exit 2 ;;
           esac
-          export DATABASE_URL="postgresql://postgres:postgres@${direct_host}:5432/gbrain_test"
-          export GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer_test
-          export GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_ci_admin_test
-          export GBRAIN_PGBOUNCER_E2E_DB=gbrain_graduation_topology_test
-          export GBRAIN_CI_REQUIRE_PGBOUNCER=1 GBRAIN_TEST_DB=1
-          probe_db="gbrain_topology_probe_test_$(python3 -c 'import uuid;print(uuid.uuid4().hex)')"
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE DATABASE $probe_db"
-          direct_count=$(psql "$DATABASE_URL" -At -c "SELECT count(*) FROM pg_database WHERE datname='$probe_db'")
-          pooler_host_count=$(psql "$GBRAIN_PGBOUNCER_DIRECT_URL" -At -c "SELECT count(*) FROM pg_database WHERE datname='$probe_db'")
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "DROP DATABASE $probe_db"
-          printf '{"topology":"%s","direct_database_count":%s,"pooler_host_database_count":%s}\n' "$CI_TOPOLOGY" "$direct_count" "$pooler_host_count" | tee /ci-results/forced-probe.json
-          # Every trial is counted. Nonzero native exits are retained, never retried
-          # as a way to turn the suite green. This job collects diagnostics only.
-          for trial in $(seq 1 10); do
-            export GBRAIN_TEST_RECEIPT_DIR="/ci-results/native-receipts/trial-${trial}"
-            set +e
-            bash scripts/run-e2e.sh test/e2e/graduation-cli-topologies.test.ts > "/ci-results/trial-${trial}.log" 2>&1
-            native_rc=$?
-            set -e
-            printf '{"trial":%s,"native_exit":%s}\n' "$trial" "$native_rc" | tee -a /ci-results/trials.jsonl
-          done
-          NATIVE_TOPOLOGY
-          docker compose -f docker-compose.ci.yml run --rm \
-            --user 1001:1001 \
-            -e CI='true' -e CI_TOPOLOGY="${{ matrix.topology }}" \
-            -e CI_PRODUCT_SHA="${{ matrix.source.sha }}" \
-            -e GITHUB_SHA="${{ matrix.source.sha }}" \
+          NATIVE_LANE
+          set +e
+          docker compose -f docker-compose.ci.yml run --rm --user 1001:1001 \
+            -e CI=true -e CI_NATIVE_LANE="${{ matrix.lane }}" -e CI_NATIVE_SHARD="${{ matrix.shard }}" \
+            -e GITHUB_SHA=148cb17f37e7a622ad29f4a5152c6896f58a2be8 \
             -e GITHUB_RUN_ID="$GITHUB_RUN_ID" \
-            -v "$RUNNER_TEMP/topology-native.sh:/topology-native.sh:ro" \
-            -v "$RUNNER_TEMP/facts-results:/ci-results" \
-            runner bash /topology-native.sh 2>&1 | tee "$RUNNER_TEMP/facts-results/collection.log"
-      - name: Retain explicit synthetic diagnostic results and native receipts
+            -v /usr/local/bin/gitleaks:/usr/local/bin/gitleaks:ro \
+            -v "$RUNNER_TEMP/native-lane.sh:/native-lane.sh:ro" \
+            -v "$RUNNER_TEMP/native-results:/ci-results" \
+            runner bash /native-lane.sh 2>&1 | tee "$RUNNER_TEMP/native-results/lane.log"
+          pipeline_rc=("${PIPESTATUS[@]}")
+          native_rc=${pipeline_rc[0]}
+          log_rc=${pipeline_rc[1]}
+          set -e
+          printf '{"lane":"%s","shard":%s,"native_exit":%s,"log_exit":%s}\n' '${{ matrix.lane }}' '${{ matrix.shard }}' "$native_rc" "$log_rc" \
+            | tee "$RUNNER_TEMP/native-results/result.json"
+          if [ "$native_rc" -eq 0 ] && [ "$log_rc" -ne 0 ]; then exit "$log_rc"; fi
+          exit "$native_rc"
+      - name: Preserve native receipts in job logs without artifact or cache uploads
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: graduation-topology-${{ matrix.source.name }}-${{ matrix.topology }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/facts-results/
-          retention-days: 7
-          if-no-files-found: error
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/native-results"
+          # Exact native JUnit, assigned-file lists, receipts and exit metadata.
+          # Full lane output is already retained in the standard job log.
+          paths=()
+          test ! -d receipts || paths+=(receipts)
+          test ! -f result.json || paths+=(result.json)
+          if [ "${#paths[@]}" -gt 0 ]; then
+            tar -czf "$RUNNER_TEMP/native-receipts.tar.gz" "${paths[@]}"
+            sha256sum "$RUNNER_TEMP/native-receipts.tar.gz"
+            wc -c "$RUNNER_TEMP/native-receipts.tar.gz"
+            echo "NATIVE_RECEIPTS_BASE64_BEGIN"
+            base64 -w 100 "$RUNNER_TEMP/native-receipts.tar.gz"
+            echo "NATIVE_RECEIPTS_BASE64_END"
+          else
+            echo "NATIVE_RECEIPTS_MISSING: no native invocation receipt or exit metadata"
+          fi
       - name: Stop only this disposable test stack
         if: always()
         run: docker compose -f docker-compose.ci.yml down --remove-orphans
