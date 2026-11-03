@@ -1,4 +1,4 @@
-name: Inline current-source discrimination
+name: Inline source daemon guarded QA smoke
 on:
   workflow_dispatch:
 permissions:
@@ -10,7 +10,7 @@ jobs:
       max-parallel: 4
       matrix:
         include:
-          - { lane: guards, shard: 0 }
+          - { lane: qa, shard: 0 }
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -55,6 +55,15 @@ jobs:
             gitleaks git . --redact --no-banner --log-opts="origin/master..HEAD"
             bash scripts/ci-local-e2e-smoke.sh
           fi
+      - name: Fetch the pinned source-native QA recorders
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/gstack-qa-tools"
+          git -C "$RUNNER_TEMP/gstack-qa-tools" init -q
+          git -C "$RUNNER_TEMP/gstack-qa-tools" fetch --depth 1 https://github.com/garrytan/gstack.git 8781d9c0a972068e2ee0e5597eb2f3482788355a
+          git -C "$RUNNER_TEMP/gstack-qa-tools" checkout --detach -q FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/gstack-qa-tools" rev-parse HEAD)" = 8781d9c0a972068e2ee0e5597eb2f3482788355a
+          test "$(cat "$RUNNER_TEMP/gstack-qa-tools/VERSION")" = 1.94.35.0
       - name: Prepare disposable native CI tools and databases
         run: |
           set -euo pipefail
@@ -90,65 +99,56 @@ jobs:
           export GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar
           export GBRAIN_TEST_RECEIPT_DIR=/ci-results/receipts
           ./bin/gbrain --version
-          case "$CI_NATIVE_LANE" in
-            guards)
-              bash scripts/check-bun-test-timeout.sh
-              # Required current-test counterfactual; source31 remains frozen.
-              # Earlier RED proved the original test, before the no-match arm.
-              cp src/commands/autopilot-daemon.ts /ci-results/daemon-before-discrimination.ts
-              DISCRIMINATE_BASE=46a6fd758b30314da475339df1f473056b80e956 \
-                bash scripts/check-test-discriminates.sh \
-                test/autopilot-inline-source-freshness.serial.test.ts \
-                src/commands/autopilot-daemon.ts 2>&1 | tee /ci-results/discrimination.helper.log
-              cmp /ci-results/daemon-before-discrimination.ts src/commands/autopilot-daemon.ts
-              git diff --exit-code -- src/commands/autopilot-daemon.ts
-              python3 - <<'PY_PROOF'
+          test "$CI_NATIVE_LANE" = qa
+          export GSTACK_ROOT=/qa-tools
+          # These are metadata readiness checks, before the single smoke clock.
+          bun --no-env-file --config=/dev/null /qa-tools/bin/gstack-qa-deadline --help
+          bun --no-env-file --config=/dev/null /qa-tools/bin/gstack-qa-evidence --help
+          mkdir -p /ci-results/qa
+          chmod 0700 /ci-results/qa
+          cat > /ci-results/qa/charter.md <<'QA_CHARTER'
+          # CLI daemon QA charter
+          Frozen source31c5a41ba; caller /ship. Functional CLI/worker smoke only.
+          Repaired prerequisite: source-native gstack QA recorder/guard now available.
+          One existing native real-daemon integration test, not another full corpus.
+          Contract: registered non-default source gets its own source/full stamps,
+          full maintenance retains its fixture purge effect, unregistered repo leaves
+          every source stamp unchanged. The native test asserts those durable effects
+          after real daemon termination, not merely enqueue/launch acceptance.
+          Fixture: synthetic temp HOME/GBRAIN_HOME and on-disk PGLite; explicit env
+          allowlist, no operator/provider credentials, no production destinations.
+          Reads: full existing test before launch; fixture payload is public/synthetic.
+          Writes: owned native temp fixture, native JUnit and this QA directory only.
+          Exit condition: exactly one test executes and passes, no failure/skip,
+          native capture status complete, original test150s bound unchanged.
+          Smoke guard:300s/one probe(max12), starts after dependencies are prepared.
+          No discovery checkpoint is needed unless another probe is selected.
+          Limits: integration-test evidence, not production/live providers, real
+          Postgres daemon contention, shutdown during resolution or macOS coverage.
+          Cleanup: native test owns and removes its temp fixture; preserve QA before
+          disposing only this job's container stack. No new product test or code edit.
+          QA_CHARTER
+          bun --no-env-file --config=/dev/null /qa-tools/bin/gstack-qa-deadline start /ci-results/qa/deadline.json 300
+          bun --no-env-file --config=/dev/null /qa-tools/bin/gstack-qa-evidence capture /ci-results/qa 001 --public --deadline /ci-results/qa/deadline.json -- \
+            env -u DATABASE_URL -u GBRAIN_DATABASE_URL bun --no-env-file --config=/dev/null test test/autopilot-inline-source-freshness.serial.test.ts --reporter=junit --reporter-outfile=/ci-results/qa/daemon.junit.xml
+          python3 - <<'QA_VERIFY'
           from pathlib import Path
-          import json, re, shutil
-          log = Path('/ci-results/discrimination.helper.log').read_text()
-          m = re.search(r'pre-fix run: exit=(\d+) pass=(\d+) fail=(\d+) \(full output: ([^)]+)\)', log)
-          assert m and int(m[1]) != 0 and int(m[3]) > 0
-          raw = Path(m[4])
-          assert raw.is_file() and raw.name.startswith('discriminate-out.')
-          shutil.copyfile(raw, '/ci-results/discrimination.prefx.log')
-          assert 'lastSource' in raw.read_text(), 'must fail the real source-stamp assertion'
-          Path('/ci-results/discrimination-proof.json').write_text(json.dumps({
-              'candidate': '31c5a41ba9103590f2c2922434b8f15c9b55f380',
-              'base': '46a6fd758b30314da475339df1f473056b80e956',
-              'helper_exit': 0, 'pre_fix_exit': int(m[1]), 'pre_fix_pass': int(m[2]),
-              'pre_fix_fail': int(m[3]), 'source_restored_exact': True
-          }))
-          PY_PROOF
-              # The native helper's paste line does not execute restored-green.
-              # Execute that assertion explicitly, not another full-corpus run.
-              env -u DATABASE_URL -u GBRAIN_DATABASE_URL bun test test/autopilot-inline-source-freshness.serial.test.ts --reporter=junit --reporter-outfile=/ci-results/discrimination.green.xml 2>&1 | tee /ci-results/discrimination.green.log
-              # Current-source typecheck and91guards already passed41678160599.
-              ;;
-            serial)
-              env -u DATABASE_URL -u GBRAIN_DATABASE_URL bun run test:serial
-              ;;
-            slow)
-              env -u DATABASE_URL -u GBRAIN_DATABASE_URL bun run test:slow
-              ;;
-            unit)
-              export GBRAIN_TEST_TIMEOUT_MULTIPLIER=6
-              env -u DATABASE_URL -u GBRAIN_DATABASE_URL SHARD="${CI_NATIVE_SHARD}/4" bash scripts/run-unit-shard.sh
-              ;;
-            e2e)
-              export GBRAIN_TEST_TIMEOUT_MULTIPLIER=6
-              # Every cell owns its own stack: direct and pooled connections
-              # target postgres-1, as established by both topology controls.
-              # Native selection, wrappers, assertions and limits are intact.
-              SHARD="${CI_NATIVE_SHARD}/4" \
-              DATABASE_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \
-              GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer_test \
-              GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_ci_admin_test \
-              GBRAIN_PGBOUNCER_E2E_DB="gbrain_pooled_${CI_NATIVE_SHARD}_test" \
-              GBRAIN_CI_REQUIRE_PGBOUNCER=1 GBRAIN_TEST_DB=1 \
-              bash scripts/run-e2e.sh
-              ;;
-            *) exit 2 ;;
-          esac
+          import json, xml.etree.ElementTree as ET
+          root = ET.parse('/ci-results/qa/daemon.junit.xml').getroot()
+          cases = root.findall('.//testcase')
+          assert len(cases) == 1 and not root.findall('.//failure') and not root.findall('.//error') and not root.findall('.//skipped')
+          annotations = {'evidence': [{'capture': '001',
+              'command': 'env -u DATABASE_URL -u GBRAIN_DATABASE_URL bun --no-env-file --config=/dev/null test test/autopilot-inline-source-freshness.serial.test.ts --reporter=junit --reporter-outfile=/ci-results/qa/daemon.junit.xml',
+              'contract': 'Real CLI registered-source/full-maintenance success and unmatched-source no-effect edge',
+              'expected': 'Exactly1native real-daemon test passes, nofailures/errors/skips; its16assertions include persistedsource/fullstamps,purgeeffectandall-sourceunchangedstamps',
+              'classification': 'pass'}],
+              'limits': ['One invocation-local guarded integration-test probe, not production acceptance',
+                         'No Postgres daemon contention, shutdown-during-resolution, liveprovider or macOS claim',
+                         'Durable fixture effects are asserted inside the real-daemon test; raw DB snapshots are not exported']}
+          Path('/ci-results/qa/annotations.json').write_text(json.dumps(annotations, indent=2))
+          QA_VERIFY
+          bun --no-env-file --config=/dev/null /qa-tools/bin/gstack-qa-evidence materialize /ci-results/qa /ci-results/qa/annotations.json
+          git diff --exit-code -- src/commands/autopilot-daemon.ts test/autopilot-inline-source-freshness.serial.test.ts scripts/serial-files.tsv
           NATIVE_LANE
           set +e
           docker compose -f docker-compose.ci.yml run --rm --user 1001:1001 \
@@ -156,6 +156,7 @@ jobs:
             -e GITHUB_SHA=31c5a41ba9103590f2c2922434b8f15c9b55f380 \
             -e GITHUB_RUN_ID="$GITHUB_RUN_ID" \
             -v /usr/local/bin/gitleaks:/usr/local/bin/gitleaks:ro \
+            -v "$RUNNER_TEMP/gstack-qa-tools:/qa-tools:ro" \
             -v "$RUNNER_TEMP/native-lane.sh:/native-lane.sh:ro" \
             -v "$RUNNER_TEMP/native-results:/ci-results" \
             runner bash /native-lane.sh 2>&1 | tee "$RUNNER_TEMP/native-results/lane.log"
@@ -177,8 +178,8 @@ jobs:
           paths=()
           test ! -d receipts || paths+=(receipts)
           test ! -f result.json || paths+=(result.json)
-          for name in discrimination.green.xml discrimination-proof.json discrimination.helper.log discrimination.prefx.log; do
-            test ! -f "$name" || paths+=("$name")
+          for name in qa; do
+            test ! -e "$name" || paths+=("$name")
           done
           if [ "${#paths[@]}" -gt 0 ]; then
             tar -czf "$RUNNER_TEMP/native-receipts.tar.gz" "${paths[@]}"
