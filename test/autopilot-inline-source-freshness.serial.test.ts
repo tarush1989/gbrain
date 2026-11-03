@@ -2,6 +2,11 @@
  * Inline autopilot must stamp its registered source without turning a full
  * non-default-source cycle into the narrower source-freshness phase set.
  * Exercise the real daemon, not a test-only export of its private tick.
+ * An unmatched repo must not invent a default source or freshen another one.
+ * Value: protects=source stamps follow only the registered inline repo;
+ * fails_when=sourceId is omitted, full maintenance narrows, or unmatched defaults;
+ * why_new=primitive tests do not invoke the daemon caller; seam=none;
+ * no_claim=live providers, Postgres contention, or shutdown-during-resolution.
  */
 import { expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
@@ -11,7 +16,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { waitFor } from './helpers/wait-for.ts';
 
-test('inline daemon stamps a non-default source and retains brain-wide maintenance', async () => {
+test('inline daemon stamps its source, retains full maintenance, and leaves unmatched repos unstamped', async () => {
   const home = mkdtempSync(join(tmpdir(), 'gbrain-inline-freshness-'));
   const repo = join(home, 'repo');
   // Deliberate allowlist: no operator DB URLs, provider keys or config.
@@ -30,26 +35,16 @@ test('inline daemon stamps a non-default source and retains brain-wide maintenan
       expect(exit, `${command[0]} failed: ${stdout}\n${stderr}`).toBe(0);
     } finally { clearTimeout(timer); }
   }
-  try {
-    await checked([process.execPath, '--no-env-file', '--config=/dev/null',
-      join(import.meta.dir, '..', 'src', 'cli.ts'), 'init', '--pglite', '--no-embedding']);
-    mkdirSync(repo);
-    writeFileSync(join(repo, 'README.md'), '# Example notes\n');
-    await checked(['git', 'init', '-q'], repo);
-    await checked(['git', 'add', 'README.md'], repo);
+  async function seedRepo(path: string) {
+    mkdirSync(path);
+    writeFileSync(join(path, 'README.md'), '# Example notes\n');
+    await checked(['git', 'init', '-q'], path);
+    await checked(['git', 'add', 'README.md'], path);
     await checked(['git', '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid',
-      '-c', 'commit.gpgsign=false', 'commit', '-qm', 'Seed fixture'], repo);
-    await checked([process.execPath, '--no-env-file', '--config=/dev/null',
-      join(import.meta.dir, '..', 'src', 'cli.ts'), 'sources', 'add', 'inline-example',
-      '--path', repo, '--no-harden']);
-
-    // Purge is outside SOURCE_FRESHNESS_PHASES. Its fixture-only side effect
-    // proves that merely passing sourceId cannot silently narrow this cycle.
-    const staleClone = join(home, '.gbrain', 'clones', '.tmp', 'stale-example');
-    mkdirSync(staleClone, { recursive: true });
-    const stale = new Date(Date.now() - 100 * 3_600_000);
-    utimesSync(staleClone, stale, stale);
-    const daemon = cli('autopilot', '--repo', repo, '--interval', '1', '--inline', '--no-worker');
+      '-c', 'commit.gpgsign=false', 'commit', '-qm', 'Seed fixture'], path);
+  }
+  async function oneCycle(path: string) {
+    const daemon = cli('autopilot', '--repo', path, '--interval', '1', '--inline', '--no-worker');
     let stdout = '', stderr = '';
     const out = (async () => { for await (const chunk of daemon.stdout) stdout += new TextDecoder().decode(chunk); })();
     const err = (async () => { for await (const chunk of daemon.stderr) stderr += new TextDecoder().decode(chunk); })();
@@ -64,20 +59,47 @@ test('inline daemon stamps a non-default source and retains brain-wide maintenan
       try { await daemon.exited; await Promise.all([out, err]); } finally { clearTimeout(kill); }
     }
     expect(stdout, stderr).toMatch(/\[cycle-inline (?:ok|clean|partial)\]/);
+  }
+  try {
+    await checked([process.execPath, '--no-env-file', '--config=/dev/null',
+      join(import.meta.dir, '..', 'src', 'cli.ts'), 'init', '--pglite', '--no-embedding']);
+    await seedRepo(repo);
+    await checked([process.execPath, '--no-env-file', '--config=/dev/null',
+      join(import.meta.dir, '..', 'src', 'cli.ts'), 'sources', 'add', 'inline-example',
+      '--path', repo, '--no-harden']);
+
+    // Purge is outside SOURCE_FRESHNESS_PHASES. Its fixture-only side effect
+    // proves that merely passing sourceId cannot silently narrow this cycle.
+    const staleClone = join(home, '.gbrain', 'clones', '.tmp', 'stale-example');
+    mkdirSync(staleClone, { recursive: true });
+    const stale = new Date(Date.now() - 100 * 3_600_000);
+    utimesSync(staleClone, stale, stale);
+    await oneCycle(repo);
 
     const config = JSON.parse(readFileSync(join(home, '.gbrain', 'config.json'), 'utf8'));
     expect(isAbsolute(config.database_path)).toBe(true);
     expect(relative(home, config.database_path).startsWith('..')).toBe(false);
-    const engine = new PGLiteEngine();
-    await withEnv({ HOME: home, GBRAIN_HOME: home }, async () => {
-      await engine.connect({ database_path: config.database_path });
-      try {
-        const sources = await engine.listAllSources();
-        const source = sources.find(s => s.id === 'inline-example');
-        expect(source?.config?.last_source_cycle_at).toEqual(expect.any(String));
-        expect(source?.config?.last_full_cycle_at).toEqual(expect.any(String));
-      } finally { await engine.disconnect(); }
-    });
+    async function sourceStamps() {
+      const engine = new PGLiteEngine();
+      return withEnv({ HOME: home, GBRAIN_HOME: home }, async () => {
+        await engine.connect({ database_path: config.database_path });
+        try {
+          return (await engine.listAllSources()).map(source => ({
+            id: source.id,
+            lastSource: source.config?.last_source_cycle_at ?? null,
+            lastFull: source.config?.last_full_cycle_at ?? null,
+          })).sort((a, b) => a.id.localeCompare(b.id));
+        } finally { await engine.disconnect(); }
+      });
+    }
+    const completed = await sourceStamps();
+    expect(completed.find(source => source.id === 'inline-example')?.lastSource).toEqual(expect.any(String));
+    expect(completed.find(source => source.id === 'inline-example')?.lastFull).toEqual(expect.any(String));
     expect(existsSync(staleClone)).toBe(false);
+
+    const unmatched = join(home, 'unregistered-repo');
+    await seedRepo(unmatched);
+    await oneCycle(unmatched);
+    expect(await sourceStamps()).toEqual(completed);
   } finally { rmSync(home, { recursive: true, force: true }); }
 }, 150_000);
