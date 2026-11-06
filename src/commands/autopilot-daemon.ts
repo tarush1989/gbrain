@@ -623,20 +623,27 @@ async function runInlineCycle(
     // extract + embed, which didn't match the Minions-dispatch
     // path's phase set). Now both converge on the same primitive.
     try {
-      const { runCycle } = await import('../core/cycle.ts');
+      const { runCycle, resolveSourceForDir } = await import('../core/cycle.ts');
       // #1872: track the promise so closeEngine can drain it on shutdown,
       // and pass the abort signal so the cycle winds down between phases.
-      const cyclePromise = runCycle(engine, {
-        brainDir: repoPath,
-        // Autopilot daemon path: pulls by default (matches
-        // pre-v0.17 autopilot behavior). CLI dream defaults false
-        // for cron safety; that choice is scoped to dream only.
-        pull: true,
-        signal: shutdownAbort.signal,
-        yieldBetweenPhases: async () => {
-          await new Promise(r => setImmediate(r));
-        },
-      });
+      // Resolve inside the tracked promise so shutdown drains this read too.
+      const cyclePromise = (async () => {
+        const sourceId = await resolveSourceForDir(engine, repoPath);
+        return runCycle(engine, {
+          brainDir: repoPath,
+          sourceId,
+          // Inline has always run full maintenance, even for non-default ids.
+          fullImplicitSourceCycle: true,
+          // Autopilot daemon path: pulls by default (matches
+          // pre-v0.17 autopilot behavior). CLI dream defaults false
+          // for cron safety; that choice is scoped to dream only.
+          pull: true,
+          signal: shutdownAbort.signal,
+          yieldBetweenPhases: async () => {
+            await new Promise(r => setImmediate(r));
+          },
+        });
+      })();
       state.inflightInlineCycle = cyclePromise;
       const report = await cyclePromise.finally(() => { state.inflightInlineCycle = null; });
       // Only 'failed' (every attempted phase failed) trips the autopilot
