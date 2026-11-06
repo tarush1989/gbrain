@@ -10,6 +10,12 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+### Fixed
+
+- Inline autopilot now records cycle freshness for the registered source matching its repository, so doctor can see that the source has cycled. It retains the full maintenance phase set for non-default sources, drains source resolution during shutdown, and leaves source freshness unchanged for an unregistered repository. Matching cycles take their source's lock; if another cycle owns the shared maintenance lock, brain-wide phases skip instead of overlapping.
+
 ## [0.60.592.0] - 2026-11-06
 
 **On a page with no import record, converting a source to git-canonical, `sources git-gap` and `repair rows-behind` now pick the winner from content evidence, never from a timestamp, and nothing overwrites a page that changed after it was reviewed.**
