@@ -10,6 +10,18 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**`gbrain repair redacted-facts` can now restore redacted facts that older conversation extractors stored with row coordinates but no facts fence.** Before, these legacy rows (source stamps `cli:extract-conversation-facts` and its colon-delimited variants) had no route back, so their redacted text stayed damaged. A fresh preview restores them in place when the holder page has no facts fence and its canonical file agrees with the database, or the source is database-only. The fact keeps its ID, coordinate, source and privacy. A legacy row whose holder or canonical file cannot be verified is listed as `held` and left unchanged. On a managed brain, upgrade the canonical owner too, because an older owner refuses the new maintenance request.
+
+### Itemized changes
+
+- `src/core/repair/redacted-facts.ts`: a new legacy restore route. The preview proves the original words, then checks that the holder has no facts fence or ambiguous markers and that its canonical file agrees. Rows that fail the check are classified `held` with the reason. The apply repeats the canonical-file check at execution while holding the page key (managed owner via `maintenancePreflight`, unmanaged via the page lock), and refuses with `source_changed` (`legacy_canonical_unproven`) when the check fails. That refusal is per page, and later pages continue. An approval from an older version never covers a legacy row.
+- `src/core/cycle/extract-facts.ts`: `canonicalCacheState` is exported and accepts `requireCanonicalTarget`, which treats a declared but missing or unresolved canonical target as `stale` instead of unavailable. Existing sweeps keep their default behaviour.
+- `src/core/persistence/prepared-maintenance.ts`, `src/core/repair/failed-writes.ts`: the new `managed_maintenance_restore_legacy_redacted_facts` intent is prepared by the same restore, and its failed writes point back to `gbrain repair redacted-facts`.
+- Docs: `docs/guides/repair.md` (the `held` outcome and the legacy route) and the architecture writer tables.
+- Tests: `test/repair-redacted-facts.test.ts` (the legacy route, held rows, canonical agreement and its execution-time recheck, managed and unmanaged apply) and `test/facts-entity-moved-7602.test.ts`.
+
 ## [0.60.600.0] - 2026-11-07
 
 **With the refresh write barrier on, writes waiting behind an import no longer use up the capacity the import itself needs, so a full cap no longer stalls managed sync until the waits expire.** The barrier is still off by default (`persistence.refresh_barrier`), and with it off nothing changes. Before, every held write kept its outstanding-request slot and intent bytes, so enough of them could leave a managed sync job, or a bulk import group, refused `queue_capacity`, and the writes it would have released waited out the limit and expired. A held `capture` that replaces an imported page now names what it replaced, as a blind `put_page` does, and the expiry pass no longer expires a hold that an import and a new deferral replaced while it ran.
