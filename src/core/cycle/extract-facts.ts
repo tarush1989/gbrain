@@ -220,7 +220,8 @@ async function syncSupersession(
 }
 
 /** The pages-table body a reconcile read: its strings, or a segmented page whose body stays in its segments. */
-type CachedBody = { id: number; body_storage?: Page['body_storage']; compiled_truth: string | null; timeline: string | null };
+type CachedBody = { id: number; body_storage?: Page['body_storage']; compiled_truth: string | null; timeline: string | null;
+  source_path?: string | null; source_uri?: string | null };
 
 /** The body a reconcile planned from is still the stored one: the same strings, or the same segmented body (content hash and size). */
 function sameBody(current: Page, planned: Page): boolean {
@@ -241,19 +242,29 @@ function sameBody(current: Page, planned: Page): boolean {
  * canonical file that exists but cannot be read is fail-closed: destructive
  * cleanup waits for a healthy sync/read instead of guessing that the cache is
  * authoritative.
+ * `requireCanonicalTarget` additionally holds a declared-but-missing target or
+ * unresolved local target (`stale`), rather than treating it as unavailable.
+ * Legacy redacted-fact repair opts into this proof; existing sweeps keep their
+ * default database-only/thin-client behavior.
  */
-async function canonicalCacheState(
+export async function canonicalCacheState(
   engine: BrainEngine,
   slug: string,
   sourceId: string,
   cached: CachedBody,
+  opts: { requireCanonicalTarget?: boolean } = {},
 ): Promise<'fresh' | 'stale' | 'unavailable'> {
   // sync.write_through=off: the fence writers already treat the file as
   // non-canonical (fence-write.ts legacy fallback), so a stale mirror file must
   // not block reconcile here either.
   if (await isWriteThroughDisabled(engine)) return 'unavailable';
   const target = await resolvePageWriteTarget(engine, slug, sourceId);
-  if (!target.ok || !existsSync(target.filePath)) return 'unavailable';
+  if (!target.ok) {
+    if (!opts.requireCanonicalTarget) return 'unavailable';
+    return target.skipped === 'no_repo_configured' && !cached.source_path && !cached.source_uri?.startsWith('file:')
+      ? 'unavailable' : 'stale';
+  }
+  if (!existsSync(target.filePath)) return opts.requireCanonicalTarget ? 'stale' : 'unavailable';
   try {
     if (isSegmentedPage(cached)) return await segmentedBodyMatchesFile(engine, cached, target.filePath);
     const canonical = parseMarkdown(readFileSync(target.filePath, 'utf-8'), target.filePath);

@@ -463,6 +463,7 @@ for (const backend of testBackends()) {
     ['managed_maintenance_expire_captured_facts', 'gbrain repair captured-facts --source default'],
     ['managed_maintenance_restore_extractor_facts', 'gbrain repair extractor-facts --source default'],
     ['managed_maintenance_restore_redacted_facts', 'gbrain repair redacted-facts --source default'],
+    ['managed_maintenance_restore_legacy_redacted_facts', 'gbrain repair redacted-facts --source default'],
     ['managed_maintenance_conversation_facts', 'gbrain extract-conversation-facts --source-id default --dry-run'],
   ];
   for (const [kind, command] of maintenanceProducers) {

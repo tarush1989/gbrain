@@ -2345,6 +2345,7 @@ matches. A page stored in segments is read as evidence up to 16 MiB.
 | `ambiguous` | A text holds two different spans around the same words, or two texts prove different restorations. | Never; listed |
 | `unproven` | No page it came from exists any more (`no_source_page`), or none still holds the words around the marker (`not_in_source`). | Never; listed |
 | `segmented` | Proved, but the fact's row sits in the `## Facts` fence of a page stored in segments, which this repair does not rewrite (`segmented_page`). The listing shows the restored text. | Never; listed |
+| `held` | The original words are proved, but a legacy extractor row's holder or canonical file cannot be safely verified. The listing explains what must agree before another preview. | Never; listed |
 
 The apply restores exactly the previewed set. A fact that changed since the
 preview reports `changed_since_preview` and keeps its text. A fact with a row
@@ -2356,6 +2357,32 @@ repair` appended to its context; its vector no longer matches its text, so
 the next `gbrain embed` re-embeds it. Page history keeps the damaged
 revisions. Edit an `ambiguous`, `unproven` or `segmented` fact by hand if you know
 the missing word.
+
+Older conversation extractors also stored row coordinates on facts that never
+had a canonical facts fence. For source stamps `cli:extract-conversation-facts`
+and its colon-delimited variants, a fresh preview can restore those facts in
+place when the active inline holder has no facts fence or ambiguous markers,
+and its canonical file agrees with the database (or the source is explicitly
+database-only). The original ID, coordinate, source, privacy and other metadata
+stay intact. Native last-writer audit fields record the repair request and its
+actor; original creation attribution stays intact. The holder and its history
+are not rewritten. A code example with
+a complete, closed marker pair is not a canonical fence; an incomplete marker
+or uncertain file state keeps the fact held.
+
+The managed owner repeats the canonical-file agreement check at execution while
+holding the holder's page key, including for a directly submitted local intent.
+An unsynced file edit after admission cannot rely on the client's earlier check.
+A holder revision change invalidates the old preview even when the original words
+remain in its text; preview again to approve that new revision.
+
+This route requires a new preview. An approval from an older version never
+gains permission to restore a legacy row through the new route. On a managed
+brain, upgrade the canonical owner's gbrain too: an older owner refuses the
+new maintenance request, so ordinary rows on that same holder also wait. After
+upgrading the owner, preview again and apply the newly approved set; native
+request recovery preserves committed work and moves past failed admissions.
+Do not clear a fact's coordinate or source to make it look database-only.
 
 <a id="loop-facts"></a>
 ### Loop facts
@@ -3892,7 +3919,7 @@ walk me through it before changing anything."*
 | Doctor `google_file_modes` warns, or the upgrade printed `[google] Google source <id> keeps its files in <dir>, outside ~/.gbrain` | `gbrain repair google-file-modes --source <id>` | `gbrain repair google-file-modes --source <id> --apply` | `gbrain doctor --only google_file_modes --json` (`google_file_modes` ok) | brain host, after the user agrees | none |
 | Recall or hot memory returns facts from gbrain's own claude-cli sessions or from pasted text; doctor `captured_facts_active` warns; the upgrade banner prints `captured_facts_active: N (explicit_kind_required; …)` | `gbrain repair captured-facts` (add `--include-ambiguous` to include paste candidates) | `gbrain repair captured-facts --apply --expect <hash>` with the hash that preview printed | `gbrain doctor --only captured_facts_active --json` (`captured_facts_active` ok) | brain host, after the user agrees | `destructive` (quarantines facts) |
 | Recall, hot memory or takes treat an orchestrator's worker briefs as your own preferences or commitments; doctor `agent_session_facts` warns | `gbrain repair agent-session-facts` (add `--cwd <prefix>` or `--session <id>` for sessions you know an orchestrator launched, `--include-ambiguous` for repeated openings) | `gbrain repair agent-session-facts --apply --expect <hash> --yes` with the hash that preview printed | `gbrain doctor --only agent_session_facts --json` (`agent_session_facts` ok) | brain host, after the user agrees | `destructive` (re-attributes facts, retires takes) |
-| A stored fact reads `[redacted](…)` where a word such as "System" belongs; doctor `facts_redaction_marker` warns; `trust scan` flags the marker | `gbrain repair redacted-facts` | `gbrain repair redacted-facts --apply --expect <hash>` with the hash that preview printed | `gbrain doctor --only facts_redaction_marker --json` (ok, or only facts the preview listed as `ambiguous` or `unproven`) | brain host, after the user agrees | none |
+| A stored fact reads `[redacted](…)` where a word such as "System" belongs; doctor `facts_redaction_marker` warns; `trust scan` flags the marker | `gbrain repair redacted-facts` | `gbrain repair redacted-facts --apply --expect <hash>` with the hash that preview printed | `gbrain doctor --only facts_redaction_marker --json` (ok, or only facts the preview listed as `ambiguous`, `unproven`, `segmented` or `held`) | brain host, after the user agrees | none |
 | Timelines put hundreds of facts on one day; doctor `fact_bulk_dates` warns that a day holds a bulk-loaded share of a source's facts | `gbrain repair fact-claim-dates --source <id>` | `gbrain repair fact-claim-dates --source <id> --apply --expect <hash> --yes` with the hash that preview printed | `gbrain repair fact-claim-dates --source <id>` lists nothing to move (doctor keeps warning while facts without a date in the claim keep the load day) | brain host, after the user agrees | none |
 | Doctor `provenance_stamp_drift` warns that pages lost their provenance stamps or trust marker, or would re-read above their stored tier | `gbrain repair provenance --source <id>` | `gbrain repair provenance --source <id> --apply --expect <hash> --yes` with the hash that preview printed | `gbrain doctor --only provenance_stamp_drift` is ok | brain host, after the user agrees | destructive |
 | A finished promise still shows on entity cards and in recall after its loop was closed; doctor `loop_facts_drift` warns; the upgrade banner prints `loop_facts_drift: N (explicit_kind_required; …)` | `gbrain repair loop-facts` | `gbrain repair loop-facts --apply --expect <hash>` | `gbrain doctor --only loop_facts_drift --json` (`loop_facts_drift` ok) | brain host, after the user agrees | `destructive` (retires facts) |
