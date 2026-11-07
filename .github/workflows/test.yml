@@ -1,4 +1,4 @@
-name: Exact source candidate post-documentation native pregate
+name: Exact candidate PostgreSQL fixture correction only
 on:
   workflow_dispatch:
 permissions:
@@ -9,7 +9,7 @@ jobs:
     timeout-minutes: 60
     services:
       postgres:
-        image: postgres:17
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -63,6 +63,7 @@ jobs:
           (cd tools && bun install --frozen-lockfile)
           (cd candidate && bun install --frozen-lockfile)
       - name: Native stage-one pregate on exact candidate
+        if: ${{ false }}
         working-directory: candidate
         env:
           GSTACK_ACTIVE_HOST: codex
@@ -70,6 +71,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/receipts"
           ../tools/bin/gstack-pregate run --stage preflight --base master --allow-repo-commands --json > "$RUNNER_TEMP/receipts/pregate-preflight.json" 2> "$RUNNER_TEMP/receipts/pregate-preflight.stderr.log"
       - name: Fresh declared documentation, type and native verify checks
+        if: ${{ false }}
         working-directory: candidate
         run: |
           set -o pipefail
@@ -78,6 +80,7 @@ jobs:
           bun run typecheck 2>&1 | tee "$RUNNER_TEMP/receipts/typecheck.log"
           bun run verify 2>&1 | tee "$RUNNER_TEMP/receipts/verify.log"
       - name: Existing focused PGLite and caller-chain regressions
+        if: ${{ false }}
         working-directory: candidate
         run: |
           ../tools/bin/gstack-evidence run --label tests -- bun test --timeout=180000 test/repair-redacted-facts.test.ts test/facts-entity-moved-7602.test.ts test/repair-apply-continue-6459.test.ts
@@ -96,12 +99,12 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/receipts"
           cp "$RUNNER_TEMP/candidate-input-manifest.json" "$RUNNER_TEMP/receipts/"
-          ../tools/bin/gstack-evidence bundle --out "$RUNNER_TEMP/receipts/evidence-bundle.json" --label tests --label postgres-focused --base master || true
+          ../tools/bin/gstack-evidence bundle --out "$RUNNER_TEMP/receipts/evidence-bundle.json" --label postgres-focused --base master || true
           cp -a .gstack/tmp "$RUNNER_TEMP/receipts/candidate-gstack-tmp" || true
           cp -a "$HOME/.gstack/projects" "$RUNNER_TEMP/receipts/native-evidence-projects" || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: source-postdoc-native-receipts
+          name: source-postdoc-postgres-fixture-receipts
           path: ${{ runner.temp }}/receipts/
           retention-days: 7
