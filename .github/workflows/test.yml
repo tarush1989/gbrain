@@ -1,4 +1,4 @@
-name: Redacted repair doctor golden environment correction
+name: Remaining runtime URL cases and current independent regression
 on:
   workflow_dispatch:
 permissions:
@@ -10,7 +10,7 @@ jobs:
       max-parallel: 4
       matrix:
         include:
-          - { lane: golden-isolation, shard: 0 }
+          - { lane: golden-more, shard: 0 }
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
@@ -58,6 +58,10 @@ jobs:
           pathlib.Path('candidate-manifest.json').write_text(json.dumps(data['files'],sort_keys=True))
           fixture=base64.b64decode(data['fixture_b64'])
           assert hashlib.sha256(fixture).hexdigest()==data['fixture_sha256']
+          original=subprocess.check_output(['git','show','HEAD:test/repair-redacted-facts.test.ts']).decode()
+          anchor='  describe(`gbrain repair redacted-facts, managed (${backend})`, () => {\n'
+          assert original.count(anchor)==1
+          pathlib.Path('test/repair-redacted-legacy-independent.test.ts').write_text(original.replace(anchor,anchor+fixture.decode(),1))
           print(json.dumps({'baseline':subprocess.check_output(['git','rev-parse','HEAD']).decode().strip(),'candidate_patch_sha256':data['patch_sha256'],'files':data['files'],'independent_fixture_sha256':data['fixture_sha256']}))
           PYCODE
       - name: Install pinned native secret scanner
@@ -135,8 +139,9 @@ jobs:
           unset LLMS_REPO_BASE
           bun -e 'import { docsUrl } from "./src/core/agent-output.ts"; if (docsUrl("docs/guides/repair.md") !== "https://github.com/garrytan/gbrain/blob/master/docs/guides/repair.md") throw new Error("runtime URL override leaked"); console.log("DOC_URL_RUNTIME_ISOLATION_PASS")'
           case "$CI_NATIVE_LANE" in
-            golden-isolation)
-              env -u DATABASE_URL -u GBRAIN_DATABASE_URL bun test --timeout=300000 test/doctor-hot-checks-golden.test.ts test/doctor-json-golden.test.ts
+            golden-more)
+              env -u DATABASE_URL -u GBRAIN_DATABASE_URL bun test --timeout=300000 test/agent-output.test.ts test/cli-goldens.test.ts test/cli-engine-free-db-down.test.ts test/cli-thin-client-refusal-matrix.test.ts test/agent-error.test.ts
+              env -u DATABASE_URL -u GBRAIN_DATABASE_URL bun test --timeout=180000 test/repair-redacted-legacy-independent.test.ts
               ;;
             preflight)
               bun run check:doc-history
