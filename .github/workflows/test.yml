@@ -1,4 +1,4 @@
-name: Owner publication refusal recovery and upstream generated contract
+name: Remaining URL-sensitive golden checks on current unchanged candidate
 on:
   workflow_dispatch:
 permissions:
@@ -10,7 +10,7 @@ jobs:
       max-parallel: 4
       matrix:
         include:
-          - { lane: publication-green, shard: 0 }
+          - { lane: golden-remaining, shard: 0 }
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
@@ -144,6 +144,15 @@ jobs:
           test -z "${LLMS_REPO_BASE:-}"
           bun -e 'import { docsUrl } from "./src/core/agent-output.ts"; if (docsUrl("docs/guides/repair.md") !== "https://github.com/garrytan/gbrain/blob/master/docs/guides/repair.md") throw new Error("runtime URL override leaked"); console.log("DOC_URL_UPSTREAM_DEFAULT_PASS")'
           case "$CI_NATIVE_LANE" in
+            golden-remaining)
+              env -u DATABASE_URL -u GBRAIN_DATABASE_URL bun test --timeout=180000 test/doctor-content-golden.test.ts
+              GBRAIN_TEST_ALLOW_DATABASE_URL=1 GBRAIN_TEST_BACKEND=postgres-direct GBRAIN_TEST_DB=1 \
+                DATABASE_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \
+                bun test --timeout=180000 test/e2e/doctor-hot-checks-golden.test.ts
+              GBRAIN_TEST_ALLOW_DATABASE_URL=1 GBRAIN_TEST_BACKEND=postgres-direct GBRAIN_TEST_DB=1 \
+                DATABASE_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \
+                bun test --timeout=180000 test/e2e/doctor-json-golden.test.ts
+              ;;
             publication-green)
               bun run check:doc-history
               bun run check:page-body-readers
