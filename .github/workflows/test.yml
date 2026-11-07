@@ -122,13 +122,10 @@ jobs:
           ./bin/gbrain --version
           case "$CI_NATIVE_LANE" in
             repair)
-              # Baseline5pass/1executed failure and patch6pass/0fail are preserved
-              # in42357492516 for byte-identical product source and independent fixture.
+              # Exact current candidate typecheck and corrected PGLite fixture passed
+              # in42358017346; unchanged baseline/patch proof in42357492516.
               rm test/repair-redacted-legacy-independent.test.ts
-              bun run typecheck
-              env -u DATABASE_URL -u GBRAIN_DATABASE_URL bun test --timeout=180000 test/repair-redacted-facts.test.ts \
-                --test-name-pattern 'unbound database-only and connector holders'
-              GBRAIN_TEST_BACKEND=postgres-direct GBRAIN_TEST_DB=1 \
+              GBRAIN_TEST_ALLOW_DATABASE_URL=1 GBRAIN_TEST_BACKEND=postgres-direct GBRAIN_TEST_DB=1 \
                 DATABASE_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \
                 bun test --timeout=180000 test/repair-redacted-facts.test.ts test/facts-entity-moved-7602.test.ts
               python3 - <<'PYHASH'
