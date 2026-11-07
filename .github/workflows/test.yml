@@ -16,6 +16,8 @@ jobs:
     env:
       GBRAIN_CI_BUN_TAG: contribution-1.4.4-curl
     steps:
+      - name: Initialize bounded result directory
+        run: mkdir -p "$RUNNER_TEMP/native-results"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: garrytan/gbrain
@@ -30,10 +32,10 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = deef2593dc3717907a1f17d7db6eb558747bfc0f
           git remote set-url origin https://github.com/garrytan/gbrain.git
-          git fetch origin deef2593dc3717907a1f17d7db6eb558747bfc0f:refs/remotes/origin/master
-          test "$(git rev-parse origin/master)" = deef2593dc3717907a1f17d7db6eb558747bfc0f
+          git fetch origin deef2593dc3717907a1f17d7db6eb558747bfc0f:refs/remotes/origin/repair-baseline
+          test "$(git rev-parse origin/repair-baseline)" = deef2593dc3717907a1f17d7db6eb558747bfc0f
           test -z "$(git status --porcelain)"
-          git diff origin/master --stat
+          git diff origin/repair-baseline --stat
           test "$(id -u)" = 1001
           nproc
           free -m
@@ -80,7 +82,7 @@ jobs:
           if [ "${{ matrix.lane }}" = guards ]; then
             bash scripts/test-gitleaks-config.sh
             bash scripts/scan-worktree-secrets.sh
-            gitleaks git . --redact --no-banner --log-opts="origin/master..HEAD"
+            gitleaks git . --redact --no-banner --log-opts="origin/repair-baseline..HEAD"
             bash scripts/ci-local-e2e-smoke.sh
           fi
       - name: Prepare disposable native CI tools and databases
