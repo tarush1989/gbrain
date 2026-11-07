@@ -62,6 +62,13 @@ jobs:
           anchor='  describe(`gbrain repair redacted-facts, managed (${backend})`, () => {\n'
           assert original.count(anchor)==1
           pathlib.Path('test/repair-redacted-legacy-independent.test.ts').write_text(original.replace(anchor,anchor+fixture.decode(),1))
+          manifest=pathlib.Path('test/postgres-unit-arms.txt')
+          independent='test/repair-redacted-legacy-independent.test.ts'
+          rows=manifest.read_text().splitlines()
+          assert independent not in rows
+          comments=[row for row in rows if row.startswith('#')]
+          arms=sorted([row for row in rows if row and not row.startswith('#')]+[independent])
+          manifest.write_text('\n'.join(comments+arms)+'\n')
           print(json.dumps({'baseline':subprocess.check_output(['git','rev-parse','HEAD']).decode().strip(),'candidate_patch_sha256':data['patch_sha256'],'files':data['files'],'independent_fixture_sha256':data['fixture_sha256']}))
           PYCODE
       - name: Install pinned native secret scanner
@@ -146,6 +153,9 @@ jobs:
                 DATABASE_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \
                 bun test --timeout=180000 test/repair-redacted-facts.test.ts
               env -u DATABASE_URL -u GBRAIN_DATABASE_URL bun test --timeout=180000 test/repair-redacted-legacy-independent.test.ts
+              GBRAIN_TEST_ALLOW_DATABASE_URL=1 GBRAIN_TEST_BACKEND=postgres-direct GBRAIN_TEST_DB=1 \
+                DATABASE_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \
+                bun test --timeout=180000 test/repair-redacted-legacy-independent.test.ts
               bun run verify
               ;;
             preflight)
