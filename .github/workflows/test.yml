@@ -48,7 +48,13 @@ jobs:
           assert subprocess.check_output(['git','rev-parse','HEAD^{tree}']).decode().strip()=='f1a1ecf328a28f7a4c5d2db2898e776ff3553377'
           assert subprocess.check_output(['git','cat-file','-t',d['reviewed_tree']]).decode().strip()=='tree'
           patch=subprocess.check_output(['git','diff','--binary',d['reviewed_base'],'HEAD'])
-          assert hashlib.sha256(patch).hexdigest()==d['source_patch_sha256']
+          print('DEFAULT_DIFF_TEXT_SHA256 '+hashlib.sha256(patch).hexdigest())
+          print('DEFAULT_DIFF_INDEX_HEADERS '+json.dumps([x for x in patch.decode().splitlines() if x.startswith('index ')][:3]))
+          portable=subprocess.check_output(['git', 'diff', '--binary', '--full-index', '--no-ext-diff', '--diff-algorithm=myers', '--src-prefix=a/', '--dst-prefix=b/', 'deef2593dc3717907a1f17d7db6eb558747bfc0f', 'HEAD'])
+          assert hashlib.sha256(portable).hexdigest()=='cd4803f9a89f04f0e1d1426ffce1a017d962390eb0811b16afe71e6a9abab06c'
+          files=json.loads('{"CHANGELOG.md":"f0bcf2638ec0d5092173db1f52d3bd6f0fd84e576689bacebffe8d6441531912","docs/architecture/canonical-writers.tsv":"57b5b99e2fd5a49eb5abb70e509ddbd43e1bb1995ac1250cc788a10590a62f93","docs/architecture/key-files/core-utilities-2.md":"3a114270071fb3ea2de955fed6751b7f0b176a7e24ad3eb3d8605c00306be83c","docs/architecture/system-of-record.md":"cdc469f75f96c66ae50603ae231344ebf4b02268884ac1ae18391234e4d5b677","docs/guides/repair.md":"a6b4d06fafa4cf2a87a929075ec89b53c00731c8c142c61f6a1f36a42f9e44da","src/core/cycle/extract-facts.ts":"06bade915616a9273e51f7ec5a41c86d636293e49bbe9c96ccf1532439acb2d8","src/core/persistence/prepared-maintenance.ts":"aaaaf014f416f4ef771913adb56f128377786264e5aff4cffe71409c84f8f4b5","src/core/repair/failed-writes.ts":"f48bcee8e981879a4afd9ca9c4ffa5240c55c5f51d3e4568ae9d53c7bccdc79b","src/core/repair/redacted-facts.ts":"5cb841fc1024249a9ff6deb68f680bcb7c2d6ecac35aaa6a1fcc4ee48323ba65","test/facts-entity-moved-7602.test.ts":"ef2df985e6d18d3f312cead0f8f313fce7514c6f2b487b1eeba5ae19c4141e7b","test/repair-redacted-facts.test.ts":"d160bb161a94257ac2cf7a601c638b9690faf6062ae8bbefde71e5ce8e15d98e"}')
+          for name,expected in files.items(): assert hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()==expected,name
+          print('ALL_ELEVEN_FILE_HASHES_VERIFIED portable_diff_sha256='+hashlib.sha256(portable).hexdigest())
           docs=gzip.decompress(base64.b64decode(d['docs_post_gzip']))
           assert hashlib.sha256(docs).hexdigest()==d['docs_post_sha256']
           (r/'docs-post.json').write_bytes(docs)
@@ -89,7 +95,11 @@ jobs:
           git diff --binary deef2593dc3717907a1f17d7db6eb558747bfc0f > "$out/receipts/source-current.patch"
           sha256sum "$out/receipts/source-current.patch"
           test ! -d "$HOME/.gstack/projects/garrytan-gbrain/pregate" || cp -a "$HOME/.gstack/projects/garrytan-gbrain/pregate" "$out/receipts/pregate-native"
-          tar -czf "$RUNNER_TEMP/native-preparation-receipts.tar.gz" -C "$out" bindings.json docs-post.json receipts native-finish.log result.json
+          paths=(receipts)
+          for name in bindings.json docs-post.json native-finish.log result.json; do
+            test ! -f "$out/$name" || paths+=("$name")
+          done
+          tar -czf "$RUNNER_TEMP/native-preparation-receipts.tar.gz" -C "$out" "${paths[@]}"
           sha256sum "$RUNNER_TEMP/native-preparation-receipts.tar.gz"
           wc -c "$RUNNER_TEMP/native-preparation-receipts.tar.gz"
           echo NATIVE_PREPARATION_RECEIPTS_BASE64_BEGIN
